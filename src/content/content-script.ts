@@ -48,7 +48,7 @@ window.addEventListener('message', (event) => {
     chrome.runtime.sendMessage({
       type: 'SOLID_LOGIN',
       actionId: event.data.actionId,
-      idpUrl: event.data.idpUrl,
+      webId: event.data.webId,
     }, (response) => {
       window.postMessage({
         source: SOLID_EXT_PREFIX,

@@ -8,6 +8,7 @@
   "scripts": {
     "build": "webpack",
     "build:dev": "webpack --mode development --watch",
+    "dev": "npx tsx scripts/dev.ts",
     "test:e2e": "npm run build && playwright test --config e2e/playwright.config.ts",
     "clean": "rm -rf dist"
   },

@@ -9,11 +9,12 @@ const CSS_BASE_URL = `http://localhost:${CSS_PORT}`;
 
 export async function startCSSServer(): Promise<void> {
   const seedConfig = path.resolve(__dirname, 'seed.json');
+  const cssConfig = path.resolve(__dirname, 'css-config.json');
 
   serverProcess = spawn('npx', [
     '@solid/community-server',
     '-p', String(CSS_PORT),
-    '-c', '@css:config/default.json',
+    '-c', cssConfig,
     '--seedConfig', seedConfig,
     '-l', 'warn',
   ], {

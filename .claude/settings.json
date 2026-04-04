@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "auto",
     "allow": [
       "WebFetch(domain:davidwalsh.name)",
       "Bash(curl -s http://localhost:3000/.account/login/)",
@@ -12,7 +13,8 @@
       "Bash(npx tsx:*)",
       "Bash(curl -s -X POST http://localhost:3000/.oidc/reg -H 'Content-Type: application/json' -d '{:*)",
       "Bash(curl -s -H \"Accept: text/html\" \"http://localhost:3000/.oidc/auth?response_type=code&client_id=test&redirect_uri=http://localhost:8080/callback&scope=openid+webid&state=test\")",
-      "Bash(curl -s -H \"Accept: text/html\" \"http://localhost:3000/.account/oidc/consent/\")"
+      "Bash(curl -s -H \"Accept: text/html\" \"http://localhost:3000/.account/oidc/consent/\")",
+      "Bash(curl -s -H \"Accept: text/turtle\" http://localhost:3000/test-pod/profile/card)"
     ]
   },
   "mcpServers": {

@@ -6,7 +6,7 @@ interface SolidExtension {
   readonly webId: string | null;
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   setClientId(clientId: string): void;
-  login(idpUrl: string): Promise<void>;
+  login(webId: string): Promise<void>;
   logout(): Promise<void>;
 }
 
@@ -89,7 +89,7 @@ function setClientId(clientId: string): void {
   }, '*');
 }
 
-function login(idpUrl: string): Promise<void> {
+function login(webId: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const actionId = crypto.randomUUID();
     pendingActions.set(actionId, { resolve, reject });
@@ -98,7 +98,7 @@ function login(idpUrl: string): Promise<void> {
       source: SOLID_EXT_PREFIX,
       type: 'SOLID_LOGIN',
       actionId,
-      idpUrl,
+      webId,
     }, '*');
   });
 }

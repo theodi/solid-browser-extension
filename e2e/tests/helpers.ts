@@ -1,12 +1,12 @@
 import type { BrowserContext } from '@playwright/test';
 
-const CSS_BASE = 'http://localhost:3000';
+const TEST_WEBID = 'http://localhost:3000/test-pod/profile/card#me';
 
 export async function performLogin(context: BrowserContext, extensionId: string) {
-  // Open popup and initiate login
+  // Open popup and initiate login with WebID
   const popupPage = await context.newPage();
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
-  await popupPage.fill('#idp-url', CSS_BASE);
+  await popupPage.fill('#webid-input', TEST_WEBID);
 
   // Listen for the CSS login page to open before clicking
   const loginPagePromise = context.waitForEvent('page');

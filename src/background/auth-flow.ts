@@ -28,6 +28,36 @@ function getRedirectUri(): string {
   return chrome.identity.getRedirectURL('callback');
 }
 
+async function resolveIssuerFromWebId(webId: string): Promise<string> {
+  // Fetch the WebID profile document as Turtle
+  const response = await fetch(webId, {
+    headers: { Accept: 'text/turtle' },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch WebID profile from ${webId}: ${response.status}`);
+  }
+  const turtle = await response.text();
+
+  // Parse solid:oidcIssuer from the Turtle document
+  // Matches both full URI and prefixed forms
+  const issuerPatterns = [
+    /solid:oidcIssuer\s+<([^>]+)>/,
+    /http:\/\/www\.w3\.org\/ns\/solid\/terms#oidcIssuer>\s+<([^>]+)>/,
+  ];
+
+  for (const pattern of issuerPatterns) {
+    const match = turtle.match(pattern);
+    if (match) {
+      return match[1];
+    }
+  }
+
+  throw new Error(
+    `No solid:oidcIssuer found in WebID profile at ${webId}. ` +
+    'Make sure your WebID profile contains a solid:oidcIssuer triple.'
+  );
+}
+
 async function dynamicClientRegistration(
   registrationEndpoint: string,
   redirectUri: string
@@ -71,7 +101,8 @@ function generateState(): string {
   return jose.base64url.encode(array);
 }
 
-export async function initiateLogin(idpUrl: string): Promise<StoredSession> {
+export async function initiateLogin(webId: string): Promise<StoredSession> {
+  const idpUrl = await resolveIssuerFromWebId(webId);
   const oidcConfig = await fetchOidcConfig(idpUrl);
   const redirectUri = getRedirectUri();
 

@@ -2,7 +2,7 @@ const loginView = document.getElementById('login-view')!;
 const loadingView = document.getElementById('loading-view')!;
 const loggedInView = document.getElementById('logged-in-view')!;
 const loginForm = document.getElementById('login-form') as HTMLFormElement;
-const idpInput = document.getElementById('idp-url') as HTMLInputElement;
+const webidInput = document.getElementById('webid-input') as HTMLInputElement;
 const loginError = document.getElementById('login-error')!;
 const webidDisplay = document.getElementById('webid-display')!;
 const logoutBtn = document.getElementById('logout-btn')!;
@@ -27,21 +27,19 @@ loginForm.addEventListener('submit', (e) => {
   e.preventDefault();
   loginError.hidden = true;
 
-  const idpUrl = idpInput.value.trim();
-  if (!idpUrl) return;
+  const webId = webidInput.value.trim();
+  if (!webId) return;
 
   showView('loading');
 
   chrome.runtime.sendMessage(
-    { type: 'SOLID_LOGIN', idpUrl },
+    { type: 'SOLID_LOGIN', webId },
     (response) => {
       if (response?.error) {
         loginError.textContent = response.error;
         loginError.hidden = false;
         showView('login');
       }
-      // Login opens a new tab — popup will close.
-      // When user returns, they'll reopen popup and see logged-in state.
     }
   );
 });

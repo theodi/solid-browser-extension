@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:davidwalsh.name)",
+      "Bash(curl -s http://localhost:3000/.account/login/)",
+      "Bash(npx @solid/community-server -p 3000 --seedConfig e2e/setup/seed.json -l warn)",
+      "Bash(curl -s http://localhost:3000/)",
+      "Bash(curl -s -H \"Accept: text/html\" http://localhost:3000/.account/login/)",
+      "Bash(curl -s -H \"Accept: text/html\" http://localhost:3000/.account/login/password/)",
+      "Bash(curl -s http://localhost:3000/.well-known/openid-configuration)",
+      "Bash(python3 -m json.tool)",
+      "Bash(npx tsx:*)",
+      "Bash(curl -s -X POST http://localhost:3000/.oidc/reg -H 'Content-Type: application/json' -d '{:*)",
+      "Bash(curl -s -H \"Accept: text/html\" \"http://localhost:3000/.oidc/auth?response_type=code&client_id=test&redirect_uri=http://localhost:8080/callback&scope=openid+webid&state=test\")",
+      "Bash(curl -s -H \"Accept: text/html\" \"http://localhost:3000/.account/oidc/consent/\")"
+    ]
+  },
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ]
+    }
+  }
+}

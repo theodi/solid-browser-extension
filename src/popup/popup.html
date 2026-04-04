@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=320">
+  <title>Solid Login</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <svg class="logo" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="64" cy="64" r="60" fill="#7C4DFF"/>
+        <text x="64" y="78" text-anchor="middle" fill="white" font-size="48" font-family="Arial, sans-serif" font-weight="bold">S</text>
+      </svg>
+      <h1>Solid</h1>
+    </div>
+
+    <div id="login-view">
+      <p class="subtitle">Sign in with your Solid identity</p>
+      <form id="login-form">
+        <label for="idp-url">Identity Provider</label>
+        <input
+          type="url"
+          id="idp-url"
+          placeholder="https://solidcommunity.net"
+          required
+        />
+        <button type="submit" id="login-btn">Sign In</button>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </div>
+
+    <div id="loading-view" hidden>
+      <div class="spinner"></div>
+      <p>Signing in...</p>
+    </div>
+
+    <div id="logged-in-view" hidden>
+      <p class="subtitle">Signed in as</p>
+      <p id="webid-display" class="webid"></p>
+      <button id="logout-btn">Sign Out</button>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

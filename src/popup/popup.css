@@ -1,0 +1,143 @@
+:root {
+  --solid-purple: #7C4DFF;
+  --solid-purple-dark: #651FFF;
+  --solid-purple-light: #B388FF;
+  --text-primary: #1a1a2e;
+  --text-secondary: #555;
+  --bg: #ffffff;
+  --border: #ddd;
+  --error: #d32f2f;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 320px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+}
+
+.container {
+  padding: 24px 20px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.logo {
+  width: 36px;
+  height: 36px;
+}
+
+.header h1 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--solid-purple);
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+input[type="url"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+input[type="url"]:focus {
+  border-color: var(--solid-purple);
+}
+
+button {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+#login-btn {
+  margin-top: 12px;
+  background: var(--solid-purple);
+  color: white;
+}
+
+#login-btn:hover {
+  background: var(--solid-purple-dark);
+}
+
+#logout-btn {
+  margin-top: 16px;
+  background: transparent;
+  color: var(--solid-purple);
+  border: 1.5px solid var(--solid-purple);
+}
+
+#logout-btn:hover {
+  background: var(--solid-purple);
+  color: white;
+}
+
+.webid {
+  font-size: 13px;
+  word-break: break-all;
+  background: #f5f0ff;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--solid-purple-light);
+  color: var(--text-primary);
+}
+
+.error {
+  color: var(--error);
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--solid-purple-light);
+  border-top-color: var(--solid-purple);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 20px auto;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+#loading-view {
+  text-align: center;
+  color: var(--text-secondary);
+}

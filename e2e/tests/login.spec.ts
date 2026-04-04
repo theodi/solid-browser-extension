@@ -8,5 +8,6 @@ test('login via popup with Community Solid Server', async ({ context, extensionI
   const popupPage = await context.newPage();
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
   await expect(popupPage.locator('#logged-in-view')).toBeVisible({ timeout: 10_000 });
-  await expect(popupPage.locator('#webid-display')).toContainText('test-pod');
+  await expect(popupPage.locator('#profile-name')).toContainText('Alex Wilder');
+  await expect(popupPage.locator('#profile-photo')).toBeVisible();
 });

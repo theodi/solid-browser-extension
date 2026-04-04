@@ -1,9 +1,13 @@
 export {};
 
+import { Parser, Store, DataFactory } from 'n3';
+import { Agent, WebIdDataset } from '@solid/object';
+
 const SOLID_EXT_PREFIX = 'solid-browser-ext';
 
 interface SolidExtension {
   readonly webId: string | null;
+  readonly profile: Agent | null;
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   setClientId(clientId: string): void;
   login(webId: string): Promise<void>;
@@ -21,6 +25,19 @@ const pendingActions = new Map<string, {
 }>();
 
 let currentWebId: string | null = null;
+let currentProfile: Agent | null = null;
+
+function buildProfile(webId: string, turtle: string): Agent | null {
+  try {
+    const parser = new Parser({ baseIRI: webId.split('#')[0] });
+    const store = new Store();
+    store.addQuads(parser.parse(turtle));
+    const dataset = new WebIdDataset(store, DataFactory);
+    return dataset.mainSubject ?? null;
+  } catch {
+    return null;
+  }
+}
 
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
@@ -46,6 +63,11 @@ window.addEventListener('message', (event) => {
 
   if (type === 'SOLID_STATE_UPDATE') {
     currentWebId = event.data.webId ?? null;
+    if (currentWebId && event.data.profileTurtle) {
+      currentProfile = buildProfile(currentWebId, event.data.profileTurtle);
+    } else {
+      currentProfile = null;
+    }
   }
 
   if (type === 'SOLID_ACTION_RESPONSE') {
@@ -80,6 +102,8 @@ function solidFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respo
   });
 }
 
+let currentClientId: string | undefined;
+
 function setClientId(clientId: string): void {
   currentClientId = clientId;
   window.postMessage({
@@ -89,8 +113,6 @@ function setClientId(clientId: string): void {
     clientId,
   }, '*');
 }
-
-let currentClientId: string | undefined;
 
 function login(webId: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -124,6 +146,9 @@ function logout(): Promise<void> {
 const solid: SolidExtension = {
   get webId() {
     return currentWebId;
+  },
+  get profile() {
+    return currentProfile;
   },
   fetch: solidFetch,
   setClientId,

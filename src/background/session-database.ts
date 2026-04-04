@@ -32,6 +32,46 @@ export async function clearSession(): Promise<void> {
   await chrome.storage.local.remove(STORAGE_KEY);
 }
 
+export interface StoredProfile {
+  webId: string;
+  name: string | null;
+  photoUrl: string | null;
+  turtle: string;
+}
+
+export async function saveProfile(profile: StoredProfile): Promise<void> {
+  await chrome.storage.local.set({ 'solid-profile': profile });
+  // Also add to past profiles
+  const past = await loadPastProfiles();
+  const existing = past.findIndex((p) => p.webId === profile.webId);
+  if (existing >= 0) {
+    past[existing] = { webId: profile.webId, name: profile.name, photoUrl: profile.photoUrl };
+  } else {
+    past.unshift({ webId: profile.webId, name: profile.name, photoUrl: profile.photoUrl });
+  }
+  await chrome.storage.local.set({ 'solid-past-profiles': past });
+}
+
+export async function loadProfile(): Promise<StoredProfile | null> {
+  const result = await chrome.storage.local.get('solid-profile');
+  return result['solid-profile'] ?? null;
+}
+
+export async function clearProfile(): Promise<void> {
+  await chrome.storage.local.remove('solid-profile');
+}
+
+export interface PastProfile {
+  webId: string;
+  name: string | null;
+  photoUrl: string | null;
+}
+
+export async function loadPastProfiles(): Promise<PastProfile[]> {
+  const result = await chrome.storage.local.get('solid-past-profiles');
+  return result['solid-past-profiles'] ?? [];
+}
+
 export async function loadClientIds(): Promise<ClientIdMapping> {
   const result = await chrome.storage.local.get('solid-client-ids');
   return result['solid-client-ids'] ?? {};

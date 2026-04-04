@@ -32,6 +32,7 @@ window.addEventListener('message', (event) => {
         source: SOLID_EXT_PREFIX,
         type: 'SOLID_STATE_UPDATE',
         webId: response?.webId ?? null,
+        profileTurtle: response?.profileTurtle ?? null,
       }, '*');
     });
   }
@@ -83,6 +84,7 @@ chrome.runtime.onMessage.addListener((message) => {
       source: SOLID_EXT_PREFIX,
       type: 'SOLID_STATE_UPDATE',
       webId: message.webId,
+      profileTurtle: message.profileTurtle ?? null,
     }, '*');
   }
 });

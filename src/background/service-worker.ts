@@ -2,11 +2,18 @@ import { initiateLogin, refreshAccessToken, createDpopProof } from './auth-flow'
 import {
   loadSession,
   clearSession,
+  clearProfile,
   importDpopKeyPair,
   saveClientId,
   loadClientIds,
+  saveProfile,
+  loadProfile,
+  loadPastProfiles,
   type StoredSession,
 } from './session-database';
+import { Parser } from 'n3';
+import { Agent, WebIdDataset } from '@solid/object';
+import { DataFactory } from 'n3';
 
 let currentSession: StoredSession | null = null;
 let currentKeyPair: CryptoKeyPair | null = null;
@@ -26,7 +33,6 @@ async function ensureSession(): Promise<{ session: StoredSession; keyPair: Crypt
     try {
       currentSession = await refreshAccessToken(currentSession, currentKeyPair);
     } catch {
-      // Refresh failed — session is dead
       currentSession = null;
       currentKeyPair = null;
       await clearSession();
@@ -37,16 +43,42 @@ async function ensureSession(): Promise<{ session: StoredSession; keyPair: Crypt
   return { session: currentSession, keyPair: currentKeyPair };
 }
 
-function broadcastStateChange(webId: string | null): void {
+function parseProfileFromTurtle(webId: string, turtle: string): { name: string | null; photoUrl: string | null } {
+  const parser = new Parser({ baseIRI: webId.split('#')[0] });
+  const store = new (require('n3').Store)();
+  store.addQuads(parser.parse(turtle));
+
+  const dataset = new WebIdDataset(store, DataFactory);
+  const agent = dataset.mainSubject;
+  return {
+    name: agent?.name ?? null,
+    photoUrl: agent?.photoUrl ?? null,
+  };
+}
+
+async function fetchAndStoreProfile(webId: string): Promise<void> {
+  try {
+    const response = await fetch(webId, {
+      headers: { Accept: 'text/turtle' },
+    });
+    if (!response.ok) return;
+    const turtle = await response.text();
+    const { name, photoUrl } = parseProfileFromTurtle(webId, turtle);
+    await saveProfile({ webId, name, photoUrl, turtle });
+  } catch {
+    // Profile fetch is best-effort
+  }
+}
+
+function broadcastStateChange(webId: string | null, profileTurtle?: string): void {
   chrome.tabs.query({}, (tabs) => {
     for (const tab of tabs) {
       if (tab.id) {
         chrome.tabs.sendMessage(tab.id, {
           type: 'SOLID_STATE_CHANGED',
           webId,
-        }).catch(() => {
-          // Tab may not have content script loaded
-        });
+          profileTurtle: profileTurtle ?? null,
+        }).catch(() => {});
       }
     }
   });
@@ -120,10 +152,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return initiateLogin(message.webId, staticClientId);
     };
     loginWithClientId()
-      .then((session) => {
+      .then(async (session) => {
         currentSession = session;
-        currentKeyPair = null; // Will be reimported on next use
-        broadcastStateChange(session.webId);
+        currentKeyPair = null;
+        await fetchAndStoreProfile(session.webId);
+        const profile = await loadProfile();
+        broadcastStateChange(session.webId, profile?.turtle);
         sendResponse({ ok: true, webId: session.webId });
       })
       .catch((err) => {
@@ -138,12 +172,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === 'SOLID_GET_STATE') {
-    ensureSession().then((ctx) => {
+    (async () => {
+      const ctx = await ensureSession();
+      const profile = await loadProfile();
+      const pastProfiles = await loadPastProfiles();
       sendResponse({
         webId: ctx?.session.webId ?? null,
         isActive: ctx !== null,
+        profileTurtle: profile?.turtle ?? null,
+        profileName: profile?.name ?? null,
+        profilePhotoUrl: profile?.photoUrl ?? null,
+        pastProfiles,
       });
-    });
+    })();
     return true;
   }
 
@@ -157,7 +198,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'SOLID_LOGOUT') {
     currentSession = null;
     currentKeyPair = null;
-    clearSession()
+    Promise.all([clearSession(), clearProfile()])
       .then(() => {
         broadcastStateChange(null);
         sendResponse({ ok: true });
@@ -170,8 +211,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 // Restore session on service worker startup
-ensureSession().then((ctx) => {
+ensureSession().then(async (ctx) => {
   if (ctx) {
-    broadcastStateChange(ctx.session.webId);
+    const profile = await loadProfile();
+    broadcastStateChange(ctx.session.webId, profile?.turtle);
   }
 });

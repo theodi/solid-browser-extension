@@ -24,6 +24,11 @@ async function fetchOidcConfig(idpUrl: string): Promise<OidcConfig> {
   return response.json();
 }
 
+// The extension's dereferenceable Client ID Document URL.
+// This URL must resolve to a JSON-LD document with the extension's redirect_uri.
+// In production, this would be hosted by the extension developer.
+const EXTENSION_CLIENT_ID = 'http://localhost:8080/client-id';
+
 function getRedirectUri(): string {
   return chrome.identity.getRedirectURL('callback');
 }
@@ -106,21 +111,8 @@ export async function initiateLogin(webId: string, staticClientId?: string): Pro
   const oidcConfig = await fetchOidcConfig(idpUrl);
   const redirectUri = getRedirectUri();
 
-  let clientId: string;
-  if (staticClientId) {
-    // Use a static (dereferenceable) client identifier — skip dynamic registration
-    clientId = staticClientId;
-  } else {
-    // Register client dynamically
-    if (!oidcConfig.registration_endpoint) {
-      throw new Error('IDP does not support dynamic client registration');
-    }
-    const registration = await dynamicClientRegistration(
-      oidcConfig.registration_endpoint,
-      redirectUri
-    );
-    clientId = registration.client_id;
-  }
+  // Use the provided client ID, or the extension's own dereferenceable client identifier
+  const clientId = staticClientId || EXTENSION_CLIENT_ID;
 
   // Generate PKCE
   const codeVerifier = generateCodeVerifier();

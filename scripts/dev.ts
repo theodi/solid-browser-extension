@@ -100,18 +100,26 @@ function pinExtension(userDataDir: string, extensionId: string) {
   const extensionId = await discoverExtensionId(userDataDir);
   pinExtension(userDataDir, extensionId);
 
-  // 4. Build the Client ID Document URL for the static-registration site
+  // 4. Start two test site servers, both configured with the extension's redirect URI
   const redirectUri = `https://${extensionId}.chromiumapp.org/callback`;
-  const clientIdUrl = `http://localhost:${CLIENT_ID_SITE_PORT}/client-id?redirect_uri=${encodeURIComponent(redirectUri)}&client_name=${encodeURIComponent('My Test App')}`;
+  const appClientIdUrl = `http://localhost:${CLIENT_ID_SITE_PORT}/client-id`;
 
-  // 5. Start two test site servers
   console.log('Starting test sites...');
 
-  const basicServer = await startTestSiteServer({ port: BASIC_SITE_PORT });
+  const basicServer = await startTestSiteServer({
+    port: BASIC_SITE_PORT,
+    redirectUri,
+    clientName: 'Solid Browser Extension',
+  });
   servers.push(basicServer);
   console.log(`  Basic site ready on http://localhost:${BASIC_SITE_PORT}`);
 
-  const clientIdServer = await startTestSiteServer({ port: CLIENT_ID_SITE_PORT, clientIdUrl });
+  const clientIdServer = await startTestSiteServer({
+    port: CLIENT_ID_SITE_PORT,
+    redirectUri,
+    clientName: 'My Test App',
+    clientIdUrl: appClientIdUrl,
+  });
   servers.push(clientIdServer);
   console.log(`  Client ID site ready on http://localhost:${CLIENT_ID_SITE_PORT}`);
 

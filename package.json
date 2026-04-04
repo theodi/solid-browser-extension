@@ -13,8 +13,11 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@rdfjs/wrapper": "^0.32.0",
+    "@solid/object": "^0.4.0",
     "@uvdsl/solid-oidc-client-browser": "^0.2.2",
-    "jose": "^5.9.6"
+    "jose": "^5.9.6",
+    "n3": "^2.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",

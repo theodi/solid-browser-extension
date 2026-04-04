@@ -107,16 +107,6 @@ button {
   color: white;
 }
 
-.webid {
-  font-size: 13px;
-  word-break: break-all;
-  background: #f5f0ff;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--solid-purple-light);
-  color: var(--text-primary);
-}
-
 .error {
   color: var(--error);
   font-size: 12px;
@@ -140,4 +130,131 @@ button {
 #loading-view {
   text-align: center;
   color: var(--text-secondary);
+}
+
+/* Profile card (logged-in state) */
+
+.profile-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f5f0ff;
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid var(--solid-purple-light);
+}
+
+.profile-photo {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.profile-initials {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--solid-purple);
+  color: white;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.profile-initials:not([hidden]) {
+  display: flex;
+}
+
+.profile-info {
+  min-width: 0;
+}
+
+.profile-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Past profiles list */
+
+.past-profiles-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.past-profile-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.past-profile-item:hover {
+  background: #f5f0ff;
+}
+
+.past-profile-photo {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.past-profile-initials {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--solid-purple-light);
+  color: white;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.past-profile-initials:not([hidden]) {
+  display: flex;
+}
+
+.past-profile-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.add-account-icon {
+  background: var(--border);
+  color: var(--text-secondary);
+  font-size: 18px;
+}
+
+.add-account-btn .past-profile-name {
+  color: var(--text-secondary);
+}
+
+#webid-form-container {
+  margin-top: 12px;
 }

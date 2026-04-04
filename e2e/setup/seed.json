@@ -4,7 +4,10 @@
     "password": "test-password-123",
     "pods": [
       {
-        "name": "test-pod"
+        "name": "test-pod",
+        "settings": {
+          "name": "Alex Wilder"
+        }
       }
     ]
   }

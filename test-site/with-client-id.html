@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Solid Test - App with Client ID</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 0 20px;
+      color: #1a1a2e;
+    }
+    h1 { color: #7C4DFF; }
+    .subtitle { color: #555; font-size: 14px; margin-top: -8px; }
+    .card {
+      background: #f5f0ff;
+      border: 1px solid #B388FF;
+      border-radius: 8px;
+      padding: 16px;
+      margin: 16px 0;
+    }
+    .label {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: #555;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    #webid, #fetch-result, #client-id-display {
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+    .error { color: #d32f2f; }
+    .waiting { color: #888; font-style: italic; }
+    button {
+      background: #7C4DFF;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    button:hover { background: #651FFF; }
+    input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1.5px solid #ddd;
+      border-radius: 8px;
+      font-size: 14px;
+      margin: 6px 0;
+      box-sizing: border-box;
+    }
+    input:focus { border-color: #7C4DFF; outline: none; }
+  </style>
+</head>
+<body>
+  <h1>Solid Test - App with Client ID</h1>
+  <p class="subtitle">This site sets its own client identifier via <code>solid.setClientId()</code></p>
+
+  <div class="card">
+    <div class="label">Client ID</div>
+    <div id="client-id-display" class="waiting">Not set</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Login</div>
+    <input type="url" id="webid-input" placeholder="https://you.solidcommunity.net/profile/card#me" />
+    <button id="login-btn">Login with solid.login()</button>
+  </div>
+
+  <div class="card">
+    <div class="label">WebID</div>
+    <div id="webid" class="waiting">Not authenticated</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Private Resource (authenticated fetch)</div>
+    <div id="fetch-result" class="waiting">Waiting for authentication...</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Status</div>
+    <div id="status">Checking for Solid extension...</div>
+  </div>
+
+  <script src="with-client-id.js"></script>
+</body>
+</html>

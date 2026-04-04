@@ -81,6 +81,7 @@ function solidFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respo
 }
 
 function setClientId(clientId: string): void {
+  currentClientId = clientId;
   window.postMessage({
     source: SOLID_EXT_PREFIX,
     type: 'SOLID_SET_CLIENT_ID',
@@ -88,6 +89,8 @@ function setClientId(clientId: string): void {
     clientId,
   }, '*');
 }
+
+let currentClientId: string | undefined;
 
 function login(webId: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -99,6 +102,8 @@ function login(webId: string): Promise<void> {
       type: 'SOLID_LOGIN',
       actionId,
       webId,
+      origin: window.location.origin,
+      clientId: currentClientId,
     }, '*');
   });
 }

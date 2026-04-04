@@ -101,21 +101,26 @@ function generateState(): string {
   return jose.base64url.encode(array);
 }
 
-export async function initiateLogin(webId: string): Promise<StoredSession> {
+export async function initiateLogin(webId: string, staticClientId?: string): Promise<StoredSession> {
   const idpUrl = await resolveIssuerFromWebId(webId);
   const oidcConfig = await fetchOidcConfig(idpUrl);
   const redirectUri = getRedirectUri();
 
-  // Register client dynamically
-  if (!oidcConfig.registration_endpoint) {
-    throw new Error('IDP does not support dynamic client registration');
+  let clientId: string;
+  if (staticClientId) {
+    // Use a static (dereferenceable) client identifier — skip dynamic registration
+    clientId = staticClientId;
+  } else {
+    // Register client dynamically
+    if (!oidcConfig.registration_endpoint) {
+      throw new Error('IDP does not support dynamic client registration');
+    }
+    const registration = await dynamicClientRegistration(
+      oidcConfig.registration_endpoint,
+      redirectUri
+    );
+    clientId = registration.client_id;
   }
-
-  const registration = await dynamicClientRegistration(
-    oidcConfig.registration_endpoint,
-    redirectUri
-  );
-  const clientId = registration.client_id;
 
   // Generate PKCE
   const codeVerifier = generateCodeVerifier();

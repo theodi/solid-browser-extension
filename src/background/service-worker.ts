@@ -114,7 +114,12 @@ async function handleAuthFetch(
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'SOLID_LOGIN') {
-    initiateLogin(message.webId)
+    const loginWithClientId = async () => {
+      const clientIds = await loadClientIds();
+      const staticClientId = message.clientId || clientIds[message.origin] || undefined;
+      return initiateLogin(message.webId, staticClientId);
+    };
+    loginWithClientId()
       .then((session) => {
         currentSession = session;
         currentKeyPair = null; // Will be reimported on next use

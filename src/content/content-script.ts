@@ -49,6 +49,8 @@ window.addEventListener('message', (event) => {
       type: 'SOLID_LOGIN',
       actionId: event.data.actionId,
       webId: event.data.webId,
+      origin: event.data.origin,
+      clientId: event.data.clientId,
     }, (response) => {
       window.postMessage({
         source: SOLID_EXT_PREFIX,

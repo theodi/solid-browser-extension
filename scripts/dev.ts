@@ -4,15 +4,19 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import http from 'http';
+import { startTestSiteServer } from '../test-site/server';
 
 const CSS_PORT = 3000;
-const TEST_SITE_PORT = 8080;
+const BASIC_SITE_PORT = 8080;
+const CLIENT_ID_SITE_PORT = 8081;
 const ROOT = path.resolve(__dirname, '..');
 
 const children: ChildProcess[] = [];
+const servers: http.Server[] = [];
 
 function cleanup() {
   for (const child of children) child.kill();
+  for (const server of servers) server.close();
   process.exit();
 }
 process.on('SIGINT', cleanup);
@@ -57,7 +61,6 @@ async function discoverExtensionId(userDataDir: string): Promise<string> {
 function pinExtension(userDataDir: string, extensionId: string) {
   const prefsPath = path.join(userDataDir, 'Default', 'Preferences');
   const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf-8'));
-  // Chrome stores pinned extensions under extensions.pinned_extensions
   prefs.extensions = prefs.extensions || {};
   prefs.extensions.pinned_extensions = prefs.extensions.pinned_extensions || [];
   if (!prefs.extensions.pinned_extensions.includes(extensionId)) {
@@ -91,34 +94,40 @@ function pinExtension(userDataDir: string, extensionId: string) {
   await waitForServer(`http://localhost:${CSS_PORT}`);
   console.log(`  CSS ready on http://localhost:${CSS_PORT}`);
 
-  // 3. Start test site
-  console.log('Starting test site...');
-  const site = spawn('npx', [
-    'http-server', path.join(ROOT, 'test-site'),
-    '-p', String(TEST_SITE_PORT),
-    '-s',
-  ], { stdio: 'pipe' });
-  children.push(site);
-  await waitForServer(`http://localhost:${TEST_SITE_PORT}`);
-  console.log(`  Test site ready on http://localhost:${TEST_SITE_PORT}`);
-
-  // 4. Launch browser briefly to discover extension ID, then pin it
+  // 3. Discover extension ID (needed to build the client ID URL)
   console.log('Configuring browser...');
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solid-ext-dev-'));
   const extensionId = await discoverExtensionId(userDataDir);
   pinExtension(userDataDir, extensionId);
 
-  // 5. Relaunch with extension pinned
-  console.log('Launching browser with extension pinned...');
+  // 4. Build the Client ID Document URL for the static-registration site
+  const redirectUri = `https://${extensionId}.chromiumapp.org/callback`;
+  const clientIdUrl = `http://localhost:${CLIENT_ID_SITE_PORT}/client-id?redirect_uri=${encodeURIComponent(redirectUri)}&client_name=${encodeURIComponent('My Test App')}`;
+
+  // 5. Start two test site servers
+  console.log('Starting test sites...');
+
+  const basicServer = await startTestSiteServer({ port: BASIC_SITE_PORT });
+  servers.push(basicServer);
+  console.log(`  Basic site ready on http://localhost:${BASIC_SITE_PORT}`);
+
+  const clientIdServer = await startTestSiteServer({ port: CLIENT_ID_SITE_PORT, clientIdUrl });
+  servers.push(clientIdServer);
+  console.log(`  Client ID site ready on http://localhost:${CLIENT_ID_SITE_PORT}`);
+
+  // 6. Relaunch with extension pinned, open both sites
+  console.log('Launching browser...');
   const context = await chromium.launchPersistentContext(userDataDir, {
     channel: 'chromium',
     headless: false,
     args: extArgs,
   });
 
-  // Open the test site
-  const page = context.pages()[0] || await context.newPage();
-  await page.goto(`http://localhost:${TEST_SITE_PORT}`);
+  const page1 = context.pages()[0] || await context.newPage();
+  await page1.goto(`http://localhost:${BASIC_SITE_PORT}/`);
+
+  const page2 = await context.newPage();
+  await page2.goto(`http://localhost:${CLIENT_ID_SITE_PORT}/with-client-id.html`);
 
   console.log('\n-----------------------------------------------');
   console.log('  Ready! Browser is open with the extension.');
@@ -128,11 +137,17 @@ function pinExtension(userDataDir: string, extensionId: string) {
   console.log('    Email:    test@example.com');
   console.log('    Password: test-password-123');
   console.log('');
-  console.log('  Test site:  http://localhost:8080');
-  console.log('  CSS:        http://localhost:3000');
+  console.log('  Sample sites (open in browser tabs):');
+  console.log('');
+  console.log('    1. Basic site (dynamic registration):');
+  console.log(`       http://localhost:${BASIC_SITE_PORT}/`);
+  console.log('');
+  console.log('    2. App with static client ID (solid.setClientId):');
+  console.log(`       http://localhost:${CLIENT_ID_SITE_PORT}/with-client-id.html`);
+  console.log('');
+  console.log('  CSS:  http://localhost:3000');
   console.log('-----------------------------------------------');
   console.log('  Close the browser or press Ctrl+C to stop.\n');
 
-  // Wait for browser to close
   context.on('close', cleanup);
 })();

@@ -1,19 +1,12 @@
-import type { BrowserContext } from '@playwright/test';
+import type { BrowserContext, Page } from '@playwright/test';
 
 const TEST_WEBID = 'http://localhost:3000/test-pod/profile/card#me';
 
-export async function performLogin(context: BrowserContext, extensionId: string) {
-  // Open popup and initiate login with WebID
-  const popupPage = await context.newPage();
-  await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
-  await popupPage.fill('#webid-input', TEST_WEBID);
-
-  // Listen for the CSS login page to open before clicking
-  const loginPagePromise = context.waitForEvent('page');
-  await popupPage.click('#login-btn');
-
-  // Get the CSS login page (opened by chrome.identity.launchWebAuthFlow)
-  const loginPage = await loginPagePromise;
+/**
+ * Complete the CSS OIDC login + consent flow on an already-opened login page.
+ * The page should be the CSS login page opened by chrome.identity.launchWebAuthFlow.
+ */
+export async function completeOidcLogin(loginPage: Page) {
   await loginPage.waitForLoadState('networkidle');
 
   // CSS auto-redirects to password login page
@@ -32,8 +25,21 @@ export async function performLogin(context: BrowserContext, extensionId: string)
   // Wait for the Authorize button to be enabled (JS populates WebIDs then enables it)
   await loginPage.waitForSelector('#authorize:not([disabled])', { timeout: 10_000 });
   await loginPage.click('#authorize');
+}
 
-  // Wait for the auth flow to complete by polling the popup for logged-in state
+/**
+ * Perform a full login flow via the extension popup using dynamic registration.
+ */
+export async function performLogin(context: BrowserContext, extensionId: string) {
+  const popupPage = await context.newPage();
+  await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
+  await popupPage.fill('#webid-input', TEST_WEBID);
+
+  const loginPagePromise = context.waitForEvent('page');
+  await popupPage.click('#login-btn');
+
+  await completeOidcLogin(await loginPagePromise);
+
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
   await popupPage.locator('#logged-in-view').waitFor({ state: 'visible', timeout: 15_000 });
 

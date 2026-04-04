@@ -1,14 +1,12 @@
 import { stopCSSServer } from './css-server';
-import type { ChildProcess } from 'child_process';
+import type http from 'http';
 
 async function globalTeardown() {
-  // Stop CSS server
   await stopCSSServer();
 
-  // Stop test site server
-  const testSiteProcess = (globalThis as Record<string, unknown>).__TEST_SITE_PROCESS__ as ChildProcess | undefined;
-  if (testSiteProcess) {
-    testSiteProcess.kill('SIGTERM');
+  const server = (globalThis as Record<string, unknown>).__TEST_SITE_SERVER__ as http.Server | undefined;
+  if (server) {
+    server.close();
   }
 }
 

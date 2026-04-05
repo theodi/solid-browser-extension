@@ -54,6 +54,54 @@ Use the Context7 MCP server for up-to-date library documentation. Prefer Context
 - Community Solid Server configuration
 - Chrome Extension MV3 APIs
 
+## Development Workflow
+
+This project uses **roborev** for continuous automated code review. Every git commit triggers an asynchronous review via a post-commit hook. Reviews are performed by GitHub Copilot (OpenAI o3) — a different model from the code-writing agent — to provide independent oversight.
+
+### Commit practices
+
+- **Commit frequently** — small, focused commits. Each commit is reviewed independently by roborev, so smaller commits produce more actionable feedback.
+- **One concern per commit** — don't mix feature code, test changes, and config changes in a single commit.
+- **Build before committing** — run `npm run build` to catch TypeScript/webpack errors. The reviewer can't run the build itself.
+- **Run tests before committing** — run `npm run test:e2e` for any changes that touch the extension source, message protocol, or auth flow.
+
+### Reviewing and fixing
+
+After committing, roborev reviews asynchronously in the background. To interact with reviews:
+
+```bash
+roborev tui            # Interactive terminal UI — view all reviews
+roborev show           # Show review for current commit
+roborev status         # Check daemon health and queue
+roborev fix            # Auto-fix findings (runs in isolated worktree)
+roborev refine         # Iteratively fix → re-review → repeat until clean
+```
+
+Review verdicts: **P** (pass), **W** (warning), **F** (fail).
+
+### When roborev flags an issue
+
+1. Read the finding in `roborev tui` or `roborev show`
+2. Either fix manually and commit, or run `roborev fix` to auto-remediate
+3. If the finding is a false positive for this project (e.g. extractable DPoP keys, localhost CLIENT_ID), it is already suppressed in `.roborev.toml` review guidelines — if new patterns need suppressing, update the `review_guidelines` field there.
+
+### For AI agents (IMPORTANT — read before making any changes)
+
+**You MUST commit after every completed set of changes.** This is not optional. The roborev post-commit hook triggers an automated review by a separate model (GitHub Copilot / OpenAI o3), providing independent oversight of your work. If you do not commit, your changes are not reviewed, and issues may go undetected.
+
+Workflow:
+1. Make your changes (code, config, docs, tests — whatever the task requires).
+2. **Commit immediately** once the changes are complete and working. Do not wait for the user to ask you to commit.
+3. After committing, run `roborev show` to check if the review has completed and whether there are findings.
+4. If roborev flags issues, fix them and **commit again** (a new commit, not an amend).
+5. For automated fix-review loops, use `roborev refine`.
+
+Rules:
+- **Small, focused commits.** One concern per commit. Do not batch unrelated changes.
+- **Build and test before committing.** Run `npm run build` and `npm run test:e2e` for source changes.
+- **Never skip commits.** Even config-only or docs-only changes must be committed so they are reviewed.
+- The `.roborev.toml` file configures review guidelines — read it to understand what the reviewer focuses on and what it ignores.
+
 ## Key Conventions
 
 - TypeScript throughout, strict mode
@@ -61,4 +109,6 @@ Use the Context7 MCP server for up-to-date library documentation. Prefer Context
 - Manifest V3 with `world: "MAIN"` for injection
 - DPoP keys stored as extractable JWK (service worker suspension)
 - Per-origin client ID support via `solid.setClientId()`
+- Extension uses a dereferenceable client identifier (not dynamic registration)
 - Solid branding for popup: primary color #7C4DFF
+- Profile data parsed with N3.js + `@solid/object` Agent class

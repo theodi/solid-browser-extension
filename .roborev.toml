@@ -1,7 +1,7 @@
 # Default agent for this repo when no workflow-specific agent is set.
 agent = '@github/copilot'
 # Default model for this repo when no workflow-specific model is set.
-model = ''
+model = 'o3'
 # Backup agent for this repo if the primary agent fails.
 backup_agent = ''
 # Backup model for this repo if the primary model fails.
@@ -9,7 +9,19 @@ backup_model = ''
 # Number of related reviews to include as context for this repo.
 review_context_count = 0
 # Extra review instructions added to prompts for this repo.
-review_guidelines = ''
+review_guidelines = '''
+Chrome browser extension (Manifest V3) providing Solid authentication.
+
+Focus on:
+- Security: OAuth/OIDC flows, token handling, DPoP proofs, message passing between MAIN world, ISOLATED world, and service worker
+- Chrome extension best practices: service worker suspension/wake-up, chrome.storage, chrome.identity
+- Solid protocol compliance: WebID resolution, client identifiers, solid:oidcIssuer validation
+- Message serialization: data over chrome.runtime and window.postMessage must be JSON-serializable
+
+Do not flag:
+- Extractable DPoP keys (required because service workers suspend)
+- CLIENT_ID constant pointing to localhost (test/dev configuration)
+'''
 # Override the review job timeout in minutes for this repo.
 job_timeout_minutes = 0
 # Branches that should be skipped for automatic review in this repo.
@@ -29,7 +41,7 @@ fix_min_severity = ''
 # Minimum severity for refine in this repo: critical, high, medium, low.
 refine_min_severity = ''
 # Filenames or glob patterns to exclude from review diffs for this repo.
-exclude_patterns = []
+exclude_patterns = ['dist/**', 'node_modules/**', '.skills/**', '.agents/**', 'e2e/setup/templates/pod/wac/**']
 # Automatic post-commit review mode for this repo: commit or branch.
 post_commit_review = ''
 reuse_review_session_lookback = 0

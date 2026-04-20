@@ -1,0 +1,20 @@
+# The WebID profile is publicly readable so that identity providers and
+# other agents can discover the WebID's oidc issuer and profile data.
+@prefix acl: <http://www.w3.org/ns/auth/acl#>.
+@prefix acp: <http://www.w3.org/ns/solid/acp#>.
+
+<#card>
+    a acp:AccessControlResource;
+    acp:resource <./card>;
+    acp:accessControl <#publicReadAccess>.
+
+<#publicReadAccess>
+    a acp:AccessControl;
+    acp:apply [
+        a acp:Policy;
+        acp:allow acl:Read;
+        acp:anyOf [
+            a acp:Matcher;
+            acp:agent acp:PublicAgent
+        ]
+    ].

@@ -1,0 +1,20 @@
+# The profile photo is publicly readable so the popup avatar and any
+# webpage linking to the WebID can render it without authentication.
+@prefix acl: <http://www.w3.org/ns/auth/acl#>.
+@prefix acp: <http://www.w3.org/ns/solid/acp#>.
+
+<#photo>
+    a acp:AccessControlResource;
+    acp:resource <./photo.jpg>;
+    acp:accessControl <#publicReadAccess>.
+
+<#publicReadAccess>
+    a acp:AccessControl;
+    acp:apply [
+        a acp:Policy;
+        acp:allow acl:Read;
+        acp:anyOf [
+            a acp:Matcher;
+            acp:agent acp:PublicAgent
+        ]
+    ].

@@ -25,7 +25,7 @@ test('extension client ID: default login uses the extension client identifier', 
   await expect(page.locator('#fetch-result')).toContainText('Private Note', { timeout: 15_000 });
 });
 
-test('app client ID: website sets its own client identifier via setClientId', async ({ context, extensionId }) => {
+test('app client ID: private resource is denied when a non-extension client identifier is used', async ({ context, extensionId }) => {
   // Navigate to the app site (port 8081) which sets its own client ID
   const page = await context.newPage();
   await page.goto(`${APP_SITE}/with-client-id.html`);
@@ -46,6 +46,9 @@ test('app client ID: website sets its own client identifier via setClientId', as
 
   await completeOidcLogin(await loginPagePromise);
 
-  // Wait for the page to update with the authenticated data
-  await expect(page.locator('#fetch-result')).toContainText('Private Note', { timeout: 15_000 });
+  // The pod's ACP for `private/notes` denies any client that is not the
+  // extension's client identifier, so the app's authenticated fetch must
+  // be forbidden even though the logged-in agent owns the pod.
+  await expect(page.locator('#fetch-result')).toContainText('HTTP 403', { timeout: 15_000 });
+  await expect(page.locator('#fetch-result')).not.toContainText('Private Note');
 });

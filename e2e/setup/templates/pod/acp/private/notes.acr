@@ -1,0 +1,37 @@
+# Access control for the private notes resource.
+#
+# Only the Solid Browser Extension's client identifier may access this
+# resource. Other Solid-OIDC clients (e.g. web apps that set their own
+# client identifier via `solid.setClientId()`) are explicitly denied,
+# even when the authenticated agent is the pod owner whose full-access
+# policy is inherited from the pod root's `memberAccessControl`.
+#
+# How it works:
+# - The deny policy's `anyOf` matcher (acp:PublicAgent) makes the policy
+#   consider every request.
+# - The `noneOf` matcher excludes requests from the extension's client
+#   identifier, so the policy only applies to requests from *other*
+#   clients. In ACP, denied modes win over allowed modes, so inherited
+#   owner-level access is overridden for non-extension clients.
+@prefix acl: <http://www.w3.org/ns/auth/acl#>.
+@prefix acp: <http://www.w3.org/ns/solid/acp#>.
+
+<#notes>
+    a acp:AccessControlResource;
+    acp:resource <./notes>;
+    acp:accessControl <#denyNonExtensionClients>.
+
+<#denyNonExtensionClients>
+    a acp:AccessControl;
+    acp:apply [
+        a acp:Policy;
+        acp:deny acl:Read, acl:Write, acl:Append, acl:Control;
+        acp:anyOf [
+            a acp:Matcher;
+            acp:agent acp:PublicAgent
+        ];
+        acp:noneOf [
+            a acp:Matcher;
+            acp:client <http://localhost:8080/client-id>
+        ]
+    ].

@@ -17,11 +17,15 @@ Page (MAIN world)  <--postMessage-->  Content Script (ISOLATED)  <--chrome.runti
 - **auth-flow.ts**: Manual OIDC flow adapted for service worker; exposes `initiateLogin` (interactive, `prompt=consent`) and `initiateSilentLogin` (non-interactive, `prompt=none`)
 - **session-database.ts**: Persists a `{ clientId → StoredSession }` map plus a shared `active WebID` in `chrome.storage.local`
 
-### Multi-client sessions
+### Multi-client sessions and fetch fallback
 
-A single signed-in WebID can have multiple concurrent sessions, one per client identifier. This is required because the `azp` claim in a Solid-OIDC access token is bound to the client that requested it, so a page that sets its own client ID via `solid.setClientId()` needs its own token. The extension silently obtains that token via OIDC `prompt=none` the first time such a page issues a `solid.fetch()`.
+A single signed-in WebID can have multiple concurrent sessions, one per client identifier. When a `solid.fetch()` arrives, the service worker resolves the effective client ID for the page's origin and looks for a matching session in this order:
 
-Silent auth only succeeds once the user has previously consented to a given client ID at the IdP (OIDC `consent_required` otherwise). First-ever use of a new client ID typically needs an interactive `solid.login()`; subsequent visits are silent.
+1. Exact match in the per-client session map.
+2. Silent OIDC re-auth (`prompt=none`) — succeeds only if the user has previously consented to that client ID at the IdP.
+3. **Fallback to any existing session**, preferring the extension's own client session.
+
+The fallback is what makes the UX pleasant: a page that sets its own client ID via `solid.setClientId()` does **not** trigger a consent popup on first visit. It just reuses the extension's already-authenticated identity. Pages that actually need per-client identity (distinct `azp` claim) can opt in by calling `solid.login()` explicitly — that establishes a dedicated session for their client ID, and every subsequent fetch from that origin uses it.
 
 ## Auth Library
 

@@ -77,27 +77,61 @@ async function silentlyAuthenticate(clientId: string): Promise<SessionContext | 
   return promise;
 }
 
+async function loadFallbackSessionContext(excludeClientId: string): Promise<SessionContext | null> {
+  // Prefer the extension's own client session (the one the user consented to
+  // in the popup) so that fetches from arbitrary pages transparently reuse
+  // the authenticated identity. If that isn't available, any other existing
+  // session will do.
+  const sessions = await loadSessions();
+  const candidates = [EXTENSION_CLIENT_ID, ...Object.keys(sessions)]
+    .filter((id) => id !== excludeClientId && id in sessions);
+  const fallbackId = candidates[0];
+  if (!fallbackId) return null;
+  const cached = sessionCache.get(fallbackId);
+  if (cached) return cached;
+  const ctx = await loadSessionContextFromStorage(fallbackId);
+  if (ctx) sessionCache.set(fallbackId, ctx);
+  return ctx;
+}
+
+async function refreshIfNeeded(
+  clientId: string,
+  ctx: SessionContext,
+): Promise<SessionContext | null> {
+  if (ctx.session.expiresAt >= Date.now() + 30_000) return ctx;
+  try {
+    ctx.session = await refreshAccessToken(ctx.session, ctx.keyPair);
+    sessionCache.set(clientId, ctx);
+    return ctx;
+  } catch {
+    sessionCache.delete(clientId);
+    await clearSessionForClient(clientId);
+    return silentlyAuthenticate(clientId);
+  }
+}
+
 async function ensureSessionForClient(clientId: string): Promise<SessionContext | null> {
   let ctx = sessionCache.get(clientId) ?? await loadSessionContextFromStorage(clientId);
-  if (ctx) sessionCache.set(clientId, ctx);
-
-  if (!ctx) {
-    ctx = await silentlyAuthenticate(clientId);
-    if (!ctx) return null;
+  if (ctx) {
+    sessionCache.set(clientId, ctx);
+    return refreshIfNeeded(clientId, ctx);
   }
 
-  if (ctx.session.expiresAt < Date.now() + 30_000) {
-    try {
-      ctx.session = await refreshAccessToken(ctx.session, ctx.keyPair);
-      sessionCache.set(clientId, ctx);
-    } catch {
-      sessionCache.delete(clientId);
-      await clearSessionForClient(clientId);
-      return silentlyAuthenticate(clientId);
-    }
-  }
+  // No stored session for this client ID. Try a silent OIDC re-auth first;
+  // this succeeds for clients the user has previously consented to (e.g. a
+  // cleared cache where the IdP SSO cookie is still valid).
+  ctx = await silentlyAuthenticate(clientId);
+  if (ctx) return refreshIfNeeded(clientId, ctx);
 
-  return ctx;
+  // Silent re-auth failed — typically because the IdP would require explicit
+  // consent for this new client. Transparently fall back to any existing
+  // session (preferring the extension's default) so the user doesn't get a
+  // consent popup every time a new page with its own client ID issues a
+  // fetch. Pages that want per-client identity can still opt in by calling
+  // solid.login() explicitly.
+  const fallback = await loadFallbackSessionContext(clientId);
+  if (!fallback) return null;
+  return refreshIfNeeded(fallback.session.clientId, fallback);
 }
 
 function parseProfileFromTurtle(webId: string, turtle: string): { name: string | null; photoUrl: string | null } {

@@ -1,5 +1,5 @@
 var PRIVATE_URL_TEMPLATE = function (webId) {
-  return webId.split('/profile/')[0] + '/shared/note';
+  return webId.split('/profile/')[0] + '/private/notes';
 };
 
 var ICONS = {
@@ -65,22 +65,7 @@ async function fetchPrivateResource() {
   try {
     await performFetch();
   } catch (err) {
-    // The extension's silent re-auth failed (e.g. first-ever use of this
-    // client ID means the IdP needs explicit consent). Fall back to an
-    // interactive solid.login() which reuses the existing SSO cookie and
-    // usually only surfaces a one-time consent screen.
-    if (err && /Not authenticated/i.test(err.message)) {
-      setStatus('loading', 'One-time consent required. Completing sign-in…');
-      try {
-        await window.solid.login(webId);
-        setStatus('loading', 'Signed in. Fetching private resource…');
-        await performFetch();
-      } catch (loginErr) {
-        setStatus('error', 'Sign-in failed: ' + (loginErr && loginErr.message || loginErr));
-      }
-    } else {
-      setStatus('error', 'Fetch error: ' + (err && err.message || err));
-    }
+    setStatus('error', 'Fetch error: ' + (err && err.message || err));
   } finally {
     accessBtn.disabled = false;
   }

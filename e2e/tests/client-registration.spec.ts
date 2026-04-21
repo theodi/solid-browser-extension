@@ -71,12 +71,13 @@ test('app client ID: private/notes is denied when the app client identifier is u
   { timeout: 15_000 }).toBe(403);
 });
 
-test('reactive auth: clicking Access triggers silent re-auth and fetches the private resource', async ({
+test('reactive auth: Access button fetches the private resource without a consent popup', async ({
   context,
   extensionId,
 }) => {
-  // Pre-consent the app client ID by running one interactive login. Covers
-  // OIDC consent_required; subsequent fetches from this origin go silent.
+  // Sign into the extension once. That session is reused by pages on other
+  // origins when they have no session of their own — so the app site never
+  // needs its own OIDC round-trip and never surfaces a consent popup.
   await performLogin(context, extensionId);
 
   const page = await context.newPage();
@@ -84,19 +85,7 @@ test('reactive auth: clicking Access triggers silent re-auth and fetches the pri
   await expect(page.locator('#client-id-display')).toContainText('8081', { timeout: 5_000 });
   await expect(page.locator('#webid')).toContainText('test-pod', { timeout: 10_000 });
 
-  // First click: the extension has no session for 8081 yet and the IdP
-  // requires consent, so the app's interactive fallback (solid.login) kicks
-  // in. Complete the consent page that pops up.
-  const loginPagePromise = context.waitForEvent('page');
-  await page.click('#access-btn');
-  await completeOidcLogin(await loginPagePromise);
-
-  // After consent, the fetch should succeed and the UI should reflect it.
-  await expect(page.locator('#status-text')).toContainText('Private resource fetched', { timeout: 15_000 });
-  await expect(page.locator('#fetch-result')).toContainText('Shared Note', { timeout: 5_000 });
-  await expect(page.locator('#status-icon')).toHaveClass(/success/);
-
-  // Second click: truly reactive + silent. No login/consent page should open.
+  // Watch for any login/consent pages that might open during the fetch.
   const unwantedPages: string[] = [];
   const onPage = (p: { url: () => string }) => {
     const url = p.url();
@@ -107,8 +96,9 @@ test('reactive auth: clicking Access triggers silent re-auth and fetches the pri
   context.on('page', onPage);
 
   await page.click('#access-btn');
-  await expect(page.locator('#status-text')).toContainText('Private resource fetched', { timeout: 10_000 });
-  await expect(page.locator('#fetch-result')).toContainText('Shared Note');
+  await expect(page.locator('#status-text')).toContainText('Private resource fetched', { timeout: 15_000 });
+  await expect(page.locator('#fetch-result')).toContainText('Private Note', { timeout: 5_000 });
+  await expect(page.locator('#status-icon')).toHaveClass(/success/);
 
   await page.waitForTimeout(500);
   expect(unwantedPages).toEqual([]);

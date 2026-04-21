@@ -8,6 +8,7 @@ const SOLID_EXT_PREFIX = 'solid-browser-ext';
 interface SolidExtension {
   readonly webId: string | null;
   readonly profile: Agent | null;
+  readonly clientId: string | undefined;
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   setClientId(clientId: string): void;
   login(webId: string): Promise<void>;
@@ -149,6 +150,9 @@ const solid: SolidExtension = {
   },
   get profile() {
     return currentProfile;
+  },
+  get clientId() {
+    return currentClientId;
   },
   fetch: solidFetch,
   setClientId,

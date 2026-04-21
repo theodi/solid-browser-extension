@@ -1,25 +1,14 @@
 # Root ACR for the pod.
-# The owner has full access, inherited by all descendants via `memberAccessControl`.
-# The pod root itself is publicly readable.
+# Default policy is owner-only and inherited by all descendants via
+# `memberAccessControl`.
 @prefix acl: <http://www.w3.org/ns/auth/acl#>.
 @prefix acp: <http://www.w3.org/ns/solid/acp#>.
 
 <#root>
     a acp:AccessControlResource;
     acp:resource <./>;
-    acp:accessControl <#fullOwnerAccess>, <#publicReadAccess>;
+    acp:accessControl <#fullOwnerAccess>;
     acp:memberAccessControl <#fullOwnerAccess>.
-
-<#publicReadAccess>
-    a acp:AccessControl;
-    acp:apply [
-        a acp:Policy;
-        acp:allow acl:Read;
-        acp:anyOf [
-            a acp:Matcher;
-            acp:agent acp:PublicAgent
-        ]
-    ].
 
 <#fullOwnerAccess>
     a acp:AccessControl;

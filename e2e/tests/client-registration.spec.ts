@@ -25,67 +25,27 @@ test('extension client ID: default login uses the extension client identifier', 
   await expect(page.locator('#fetch-result')).toContainText('Private Note', { timeout: 15_000 });
 });
 
-test('app client ID: private/notes is denied when the app client identifier is used', async ({ context, extensionId }) => {
-  // Sign into the extension first (extension client ID is consented at the IdP).
-  await performLogin(context, extensionId);
-
-  // Navigate to the app site so it registers its own client ID.
-  const page = await context.newPage();
-  await page.goto(`${APP_SITE}/with-client-id.html`);
-  await page.waitForFunction(
-    () => typeof (window as { solid?: unknown }).solid !== 'undefined',
-    null,
-    { timeout: 5_000 },
-  );
-  await expect(page.locator('#client-id-display')).toContainText('8081', { timeout: 5_000 });
-
-  // The pod's ACP denies the 8081 client for /private/notes. Calling
-  // solid.fetch directly (bypassing the demo UI which uses /shared/note)
-  // lets us assert the security behaviour regardless of the page markup.
-  // The extension may need an interactive consent for this client — do a
-  // one-shot solid.login to grant it, mirroring what the app UI does on
-  // first visit.
-  const loginPagePromise = context.waitForEvent('page');
-  await page.evaluate((webId) => {
-    // Fire-and-forget: the evaluate must return immediately so the test can
-    // interact with the auth popup; solid.login resolves asynchronously.
-    void (window as unknown as {
-      solid: { login: (w: string) => Promise<void> };
-    }).solid.login(webId);
-  }, TEST_WEBID);
-  await completeOidcLogin(await loginPagePromise);
-
-  // After the consent flow settles the session for the 8081 client, issue
-  // the fetch and expect the ACP to deny it with 403.
-  await expect.poll(async () =>
-    page.evaluate(async () => {
-      try {
-        const res = await (window as unknown as {
-          solid: { fetch: (url: string) => Promise<Response> };
-        }).solid.fetch('http://localhost:3000/test-pod/private/notes');
-        return res.status;
-      } catch {
-        return -1;
-      }
-    }),
-  { timeout: 15_000 }).toBe(403);
-});
-
-test('reactive auth: Access button fetches the private resource without a consent popup', async ({
+test('identity isolation: app client ID gets a silently brokered per-client session and is denied by the pod ACP', async ({
   context,
   extensionId,
 }) => {
-  // Sign into the extension once. That session is reused by pages on other
-  // origins when they have no session of their own — so the app site never
-  // needs its own OIDC round-trip and never surfaces a consent popup.
+  // Sign into the extension first. After this, the extension holds a master
+  // session for EXTENSION_CLIENT_ID (localhost:8080/client-id) consented at
+  // the IdP. The app's own clientId (localhost:8081/client-id) has no session.
   await performLogin(context, extensionId);
 
+  // Navigate to the app site. It calls solid.setClientId(localhost:8081/client-id)
+  // on load, so any subsequent solid.fetch() from this origin must be served
+  // by a session scoped to that app clientId — never the extension's master
+  // session.
   const page = await context.newPage();
   await page.goto(`${APP_SITE}/with-client-id.html`);
   await expect(page.locator('#client-id-display')).toContainText('8081', { timeout: 5_000 });
   await expect(page.locator('#webid')).toContainText('test-pod', { timeout: 10_000 });
 
-  // Watch for any login/consent pages that might open during the fetch.
+  // No login/consent pages should open — the extension must broker the
+  // per-client session silently (prompt=none) while the user clicks the
+  // button in the app page.
   const unwantedPages: string[] = [];
   const onPage = (p: { url: () => string }) => {
     const url = p.url();
@@ -95,10 +55,13 @@ test('reactive auth: Access button fetches the private resource without a consen
   };
   context.on('page', onPage);
 
+  // Click "Access private resource". The demo button calls solid.fetch on
+  // /private/notes. The pod's ACR denies the 8081 client explicitly, so the
+  // request MUST surface as 403 — a 200 would mean the extension leaked its
+  // master session into the app.
   await page.click('#access-btn');
-  await expect(page.locator('#status-text')).toContainText('Private resource fetched', { timeout: 15_000 });
-  await expect(page.locator('#fetch-result')).toContainText('Private Note', { timeout: 5_000 });
-  await expect(page.locator('#status-icon')).toHaveClass(/success/);
+  await expect(page.locator('#status-text')).toContainText('HTTP 403', { timeout: 15_000 });
+  await expect(page.locator('#status-icon')).toHaveClass(/error/);
 
   await page.waitForTimeout(500);
   expect(unwantedPages).toEqual([]);

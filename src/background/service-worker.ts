@@ -77,23 +77,6 @@ async function silentlyAuthenticate(clientId: string): Promise<SessionContext | 
   return promise;
 }
 
-async function loadFallbackSessionContext(excludeClientId: string): Promise<SessionContext | null> {
-  // Prefer the extension's own client session (the one the user consented to
-  // in the popup) so that fetches from arbitrary pages transparently reuse
-  // the authenticated identity. If that isn't available, any other existing
-  // session will do.
-  const sessions = await loadSessions();
-  const candidates = [EXTENSION_CLIENT_ID, ...Object.keys(sessions)]
-    .filter((id) => id !== excludeClientId && id in sessions);
-  const fallbackId = candidates[0];
-  if (!fallbackId) return null;
-  const cached = sessionCache.get(fallbackId);
-  if (cached) return cached;
-  const ctx = await loadSessionContextFromStorage(fallbackId);
-  if (ctx) sessionCache.set(fallbackId, ctx);
-  return ctx;
-}
-
 async function refreshIfNeeded(
   clientId: string,
   ctx: SessionContext,
@@ -111,27 +94,21 @@ async function refreshIfNeeded(
 }
 
 async function ensureSessionForClient(clientId: string): Promise<SessionContext | null> {
-  let ctx = sessionCache.get(clientId) ?? await loadSessionContextFromStorage(clientId);
+  const ctx = sessionCache.get(clientId) ?? await loadSessionContextFromStorage(clientId);
   if (ctx) {
     sessionCache.set(clientId, ctx);
     return refreshIfNeeded(clientId, ctx);
   }
 
-  // No stored session for this client ID. Try a silent OIDC re-auth first;
-  // this succeeds for clients the user has previously consented to (e.g. a
-  // cleared cache where the IdP SSO cookie is still valid).
-  ctx = await silentlyAuthenticate(clientId);
-  if (ctx) return refreshIfNeeded(clientId, ctx);
-
-  // Silent re-auth failed — typically because the IdP would require explicit
-  // consent for this new client. Transparently fall back to any existing
-  // session (preferring the extension's default) so the user doesn't get a
-  // consent popup every time a new page with its own client ID issues a
-  // fetch. Pages that want per-client identity can still opt in by calling
-  // solid.login() explicitly.
-  const fallback = await loadFallbackSessionContext(clientId);
-  if (!fallback) return null;
-  return refreshIfNeeded(fallback.session.clientId, fallback);
+  // No stored session for this client ID. Broker a per-client session via
+  // silent OIDC re-auth (prompt=none) — this is the token-broker contract:
+  // the extension holds the master session, and each app gets its own scoped
+  // session keyed to its own clientId. We deliberately do NOT fall back to
+  // another client's session, because that would leak the master identity's
+  // OIDC scope into the app and defeat the Identity Isolation guarantee.
+  const silent = await silentlyAuthenticate(clientId);
+  if (silent) return refreshIfNeeded(clientId, silent);
+  return null;
 }
 
 function parseProfileFromTurtle(webId: string, turtle: string): { name: string | null; photoUrl: string | null } {

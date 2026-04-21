@@ -51,6 +51,14 @@ async function silentlyAuthenticate(clientId: string): Promise<SessionContext | 
   const promise = (async (): Promise<SessionContext | null> => {
     try {
       const session = await initiateSilentLogin(webId, clientId);
+      // Recheck the active WebID: if the user logged out or switched accounts
+      // while we were off awaiting the IdP, initiateSilentLogin has already
+      // persisted a session for a user that is no longer active. Drop it.
+      const currentActive = await loadActiveWebId();
+      if (currentActive !== session.webId) {
+        await clearSessionForClient(clientId);
+        return null;
+      }
       const keyPair = await importDpopKeyPair(session.dpopKeyPair);
       const ctx: SessionContext = { session, keyPair };
       sessionCache.set(clientId, ctx);

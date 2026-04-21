@@ -1,51 +1,100 @@
-import { initiateLogin, refreshAccessToken, createDpopProof } from './auth-flow';
+import { initiateLogin, initiateSilentLogin, refreshAccessToken, createDpopProof, EXTENSION_CLIENT_ID } from './auth-flow';
 import {
-  loadSession,
-  clearSession,
+  clearAllSessions,
   clearProfile,
+  clearActiveWebId,
+  clearSessionForClient,
   importDpopKeyPair,
-  saveClientId,
+  loadActiveWebId,
   loadClientIds,
-  saveProfile,
-  loadProfile,
   loadPastProfiles,
+  loadProfile,
+  loadSessionForClient,
+  loadSessions,
+  saveActiveWebId,
+  saveClientId,
+  saveProfile,
+  saveSession,
   type StoredSession,
 } from './session-database';
-import { Parser } from 'n3';
+import { Parser, Store, DataFactory } from 'n3';
 import { Agent, WebIdDataset } from '@solid/object';
-import { DataFactory } from 'n3';
 
-let currentSession: StoredSession | null = null;
-let currentKeyPair: CryptoKeyPair | null = null;
+interface SessionContext {
+  session: StoredSession;
+  keyPair: CryptoKeyPair;
+}
 
-async function ensureSession(): Promise<{ session: StoredSession; keyPair: CryptoKeyPair } | null> {
-  if (!currentSession) {
-    currentSession = await loadSession();
-  }
-  if (!currentSession) return null;
+const sessionCache = new Map<string, SessionContext>();
+const pendingSilentAuth = new Map<string, Promise<SessionContext | null>>();
 
-  if (!currentKeyPair) {
-    currentKeyPair = await importDpopKeyPair(currentSession.dpopKeyPair);
-  }
+async function resolveClientIdForOrigin(origin: string | undefined): Promise<string> {
+  if (!origin) return EXTENSION_CLIENT_ID;
+  const mapping = await loadClientIds();
+  return mapping[origin] ?? EXTENSION_CLIENT_ID;
+}
 
-  // Refresh token if expired or about to expire (30s buffer)
-  if (currentSession.expiresAt < Date.now() + 30_000) {
+async function loadSessionContextFromStorage(clientId: string): Promise<SessionContext | null> {
+  const stored = await loadSessionForClient(clientId);
+  if (!stored) return null;
+  const keyPair = await importDpopKeyPair(stored.dpopKeyPair);
+  return { session: stored, keyPair };
+}
+
+async function silentlyAuthenticate(clientId: string): Promise<SessionContext | null> {
+  const webId = await loadActiveWebId();
+  if (!webId) return null;
+
+  const existing = pendingSilentAuth.get(clientId);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<SessionContext | null> => {
     try {
-      currentSession = await refreshAccessToken(currentSession, currentKeyPair);
+      const session = await initiateSilentLogin(webId, clientId);
+      const keyPair = await importDpopKeyPair(session.dpopKeyPair);
+      const ctx: SessionContext = { session, keyPair };
+      sessionCache.set(clientId, ctx);
+      return ctx;
     } catch {
-      currentSession = null;
-      currentKeyPair = null;
-      await clearSession();
+      // Silent auth fails when the IdP requires interactive consent for this
+      // client ID (OIDC consent_required). The page can recover by calling
+      // solid.login() explicitly.
       return null;
+    } finally {
+      pendingSilentAuth.delete(clientId);
+    }
+  })();
+
+  pendingSilentAuth.set(clientId, promise);
+  return promise;
+}
+
+async function ensureSessionForClient(clientId: string): Promise<SessionContext | null> {
+  let ctx = sessionCache.get(clientId) ?? await loadSessionContextFromStorage(clientId);
+  if (ctx) sessionCache.set(clientId, ctx);
+
+  if (!ctx) {
+    ctx = await silentlyAuthenticate(clientId);
+    if (!ctx) return null;
+  }
+
+  if (ctx.session.expiresAt < Date.now() + 30_000) {
+    try {
+      ctx.session = await refreshAccessToken(ctx.session, ctx.keyPair);
+      sessionCache.set(clientId, ctx);
+    } catch {
+      sessionCache.delete(clientId);
+      await clearSessionForClient(clientId);
+      return silentlyAuthenticate(clientId);
     }
   }
 
-  return { session: currentSession, keyPair: currentKeyPair };
+  return ctx;
 }
 
 function parseProfileFromTurtle(webId: string, turtle: string): { name: string | null; photoUrl: string | null } {
   const parser = new Parser({ baseIRI: webId.split('#')[0] });
-  const store = new (require('n3').Store)();
+  const store = new Store();
   store.addQuads(parser.parse(turtle));
 
   const dataset = new WebIdDataset(store, DataFactory);
@@ -91,6 +140,7 @@ async function handleAuthFetch(
     method: string;
     headers: Record<string, string>;
     body: string | null;
+    origin?: string;
   }
 ): Promise<{
   requestId: string;
@@ -100,7 +150,8 @@ async function handleAuthFetch(
   body?: string;
   error?: string;
 }> {
-  const ctx = await ensureSession();
+  const clientId = await resolveClientIdForOrigin(message.origin);
+  const ctx = await ensureSessionForClient(clientId);
   if (!ctx) {
     return { requestId: message.requestId, error: 'Not authenticated' };
   }
@@ -153,8 +204,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     };
     loginWithClientId()
       .then(async (session) => {
-        currentSession = session;
-        currentKeyPair = null;
+        const previousWebId = await loadActiveWebId();
+        if (previousWebId && previousWebId !== session.webId) {
+          sessionCache.clear();
+          pendingSilentAuth.clear();
+          await clearAllSessions();
+          // initiateLogin already persisted this session; re-save after purging the old user's map.
+          await saveSession(session);
+        }
+        sessionCache.set(session.clientId, {
+          session,
+          keyPair: await importDpopKeyPair(session.dpopKeyPair),
+        });
+        await saveActiveWebId(session.webId);
         await fetchAndStoreProfile(session.webId);
         const profile = await loadProfile();
         broadcastStateChange(session.webId, profile?.turtle);
@@ -173,12 +235,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === 'SOLID_GET_STATE') {
     (async () => {
-      const ctx = await ensureSession();
+      const webId = await loadActiveWebId();
       const profile = await loadProfile();
       const pastProfiles = await loadPastProfiles();
       sendResponse({
-        webId: ctx?.session.webId ?? null,
-        isActive: ctx !== null,
+        webId,
+        isActive: webId !== null,
         profileTurtle: profile?.turtle ?? null,
         profileName: profile?.name ?? null,
         profilePhotoUrl: profile?.photoUrl ?? null,
@@ -196,9 +258,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === 'SOLID_LOGOUT') {
-    currentSession = null;
-    currentKeyPair = null;
-    Promise.all([clearSession(), clearProfile()])
+    sessionCache.clear();
+    pendingSilentAuth.clear();
+    Promise.all([clearAllSessions(), clearActiveWebId(), clearProfile()])
       .then(() => {
         broadcastStateChange(null);
         sendResponse({ ok: true });
@@ -210,10 +272,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-// Restore session on service worker startup
-ensureSession().then(async (ctx) => {
-  if (ctx) {
-    const profile = await loadProfile();
-    broadcastStateChange(ctx.session.webId, profile?.turtle);
+// Restore broadcast state on service worker startup
+(async () => {
+  const webId = await loadActiveWebId();
+  if (!webId) return;
+  // Warm the cache for any stored sessions so later fetches skip storage round-trips.
+  const sessions = await loadSessions();
+  for (const [clientId, session] of Object.entries(sessions)) {
+    sessionCache.set(clientId, {
+      session,
+      keyPair: await importDpopKeyPair(session.dpopKeyPair),
+    });
   }
-});
+  const profile = await loadProfile();
+  broadcastStateChange(webId, profile?.turtle);
+})();

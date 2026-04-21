@@ -12,10 +12,16 @@ Page (MAIN world)  <--postMessage-->  Content Script (ISOLATED)  <--chrome.runti
 ```
 
 - **inject.ts**: MAIN world script defining `window.solid`
-- **content-script.ts**: ISOLATED world bridge relaying messages
-- **service-worker.ts**: Background session manager, auth fetch proxy, client ID registry
-- **auth-flow.ts**: Manual OIDC flow adapted for service worker (no `window`)
-- **session-database.ts**: Token/key persistence via `chrome.storage.local`
+- **content-script.ts**: ISOLATED world bridge relaying messages (attaches page origin to fetch)
+- **service-worker.ts**: Background session manager. Maintains one session per client ID, routes `solid.fetch()` by origin → per-origin client ID → session, and performs silent re-auth (`prompt=none`, `chrome.identity.launchWebAuthFlow({interactive:false})`) when no session exists for the target client ID
+- **auth-flow.ts**: Manual OIDC flow adapted for service worker; exposes `initiateLogin` (interactive, `prompt=consent`) and `initiateSilentLogin` (non-interactive, `prompt=none`)
+- **session-database.ts**: Persists a `{ clientId → StoredSession }` map plus a shared `active WebID` in `chrome.storage.local`
+
+### Multi-client sessions
+
+A single signed-in WebID can have multiple concurrent sessions, one per client identifier. This is required because the `azp` claim in a Solid-OIDC access token is bound to the client that requested it, so a page that sets its own client ID via `solid.setClientId()` needs its own token. The extension silently obtains that token via OIDC `prompt=none` the first time such a page issues a `solid.fetch()`.
+
+Silent auth only succeeds once the user has previously consented to a given client ID at the IdP (OIDC `consent_required` otherwise). First-ever use of a new client ID typically needs an interactive `solid.login()`; subsequent visits are silent.
 
 ## Auth Library
 

@@ -1,4 +1,6 @@
-const STORAGE_KEY = 'solid-session';
+const SESSIONS_KEY = 'solid-sessions';
+const ACTIVE_WEBID_KEY = 'solid-active-webid';
+const LEGACY_SESSION_KEY = 'solid-session';
 
 export interface StoredSession {
   webId: string;
@@ -19,17 +21,63 @@ export interface ClientIdMapping {
   [origin: string]: string;
 }
 
-export async function loadSession(): Promise<StoredSession | null> {
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  return result[STORAGE_KEY] ?? null;
+export type SessionMap = Record<string, StoredSession>;
+
+async function migrateLegacySession(): Promise<void> {
+  const legacy = await chrome.storage.local.get(LEGACY_SESSION_KEY);
+  const old = legacy[LEGACY_SESSION_KEY] as StoredSession | undefined;
+  if (!old) return;
+  const current = await chrome.storage.local.get([SESSIONS_KEY, ACTIVE_WEBID_KEY]);
+  const sessions: SessionMap = current[SESSIONS_KEY] ?? {};
+  if (!sessions[old.clientId]) {
+    sessions[old.clientId] = old;
+    await chrome.storage.local.set({ [SESSIONS_KEY]: sessions });
+  }
+  if (!current[ACTIVE_WEBID_KEY]) {
+    await chrome.storage.local.set({ [ACTIVE_WEBID_KEY]: old.webId });
+  }
+  await chrome.storage.local.remove(LEGACY_SESSION_KEY);
+}
+
+export async function loadSessions(): Promise<SessionMap> {
+  await migrateLegacySession();
+  const result = await chrome.storage.local.get(SESSIONS_KEY);
+  return (result[SESSIONS_KEY] as SessionMap | undefined) ?? {};
+}
+
+export async function loadSessionForClient(clientId: string): Promise<StoredSession | null> {
+  const all = await loadSessions();
+  return all[clientId] ?? null;
 }
 
 export async function saveSession(session: StoredSession): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY]: session });
+  const all = await loadSessions();
+  all[session.clientId] = session;
+  await chrome.storage.local.set({ [SESSIONS_KEY]: all });
 }
 
-export async function clearSession(): Promise<void> {
-  await chrome.storage.local.remove(STORAGE_KEY);
+export async function clearSessionForClient(clientId: string): Promise<void> {
+  const all = await loadSessions();
+  if (!(clientId in all)) return;
+  delete all[clientId];
+  await chrome.storage.local.set({ [SESSIONS_KEY]: all });
+}
+
+export async function clearAllSessions(): Promise<void> {
+  await chrome.storage.local.remove(SESSIONS_KEY);
+}
+
+export async function loadActiveWebId(): Promise<string | null> {
+  const result = await chrome.storage.local.get(ACTIVE_WEBID_KEY);
+  return (result[ACTIVE_WEBID_KEY] as string | undefined) ?? null;
+}
+
+export async function saveActiveWebId(webId: string): Promise<void> {
+  await chrome.storage.local.set({ [ACTIVE_WEBID_KEY]: webId });
+}
+
+export async function clearActiveWebId(): Promise<void> {
+  await chrome.storage.local.remove(ACTIVE_WEBID_KEY);
 }
 
 export interface StoredProfile {

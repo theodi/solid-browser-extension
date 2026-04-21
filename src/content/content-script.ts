@@ -17,6 +17,7 @@ window.addEventListener('message', (event) => {
       method: event.data.method,
       headers: event.data.headers,
       body: event.data.body,
+      origin: window.location.origin,
     }, (response) => {
       window.postMessage({
         source: SOLID_EXT_PREFIX,

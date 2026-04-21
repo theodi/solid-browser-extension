@@ -27,7 +27,7 @@ async function fetchOidcConfig(idpUrl: string): Promise<OidcConfig> {
 // The extension's dereferenceable Client ID Document URL.
 // This URL must resolve to a JSON-LD document with the extension's redirect_uri.
 // In production, this would be hosted by the extension developer.
-const EXTENSION_CLIENT_ID = 'http://localhost:8080/client-id';
+export const EXTENSION_CLIENT_ID = 'http://localhost:8080/client-id';
 
 function getRedirectUri(): string {
   return chrome.identity.getRedirectURL('callback');
@@ -107,19 +107,28 @@ function generateState(): string {
 }
 
 export async function initiateLogin(webId: string, staticClientId?: string): Promise<StoredSession> {
+  const clientId = staticClientId || EXTENSION_CLIENT_ID;
+  return runAuthFlow(webId, clientId, 'consent', true);
+}
+
+export async function initiateSilentLogin(webId: string, clientId: string): Promise<StoredSession> {
+  return runAuthFlow(webId, clientId, 'none', false);
+}
+
+async function runAuthFlow(
+  webId: string,
+  clientId: string,
+  prompt: 'consent' | 'none',
+  interactive: boolean,
+): Promise<StoredSession> {
   const idpUrl = await resolveIssuerFromWebId(webId);
   const oidcConfig = await fetchOidcConfig(idpUrl);
   const redirectUri = getRedirectUri();
 
-  // Use the provided client ID, or the extension's own dereferenceable client identifier
-  const clientId = staticClientId || EXTENSION_CLIENT_ID;
-
-  // Generate PKCE
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await generateCodeChallenge(codeVerifier);
   const state = generateState();
 
-  // Store auth params for token exchange
   await saveAuthParams({
     codeVerifier,
     state,
@@ -129,7 +138,6 @@ export async function initiateLogin(webId: string, staticClientId?: string): Pro
     redirectUri,
   });
 
-  // Build authorization URL
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: clientId,
@@ -138,15 +146,14 @@ export async function initiateLogin(webId: string, staticClientId?: string): Pro
     state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
-    prompt: 'consent',
+    prompt,
   });
 
   const authUrl = `${oidcConfig.authorization_endpoint}?${params.toString()}`;
 
-  // Launch the auth flow using chrome.identity
   const callbackUrl = await new Promise<string>((resolve, reject) => {
     chrome.identity.launchWebAuthFlow(
-      { url: authUrl, interactive: true },
+      { url: authUrl, interactive },
       (responseUrl) => {
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
@@ -159,7 +166,6 @@ export async function initiateLogin(webId: string, staticClientId?: string): Pro
     );
   });
 
-  // Extract code, state, iss from callback URL
   const callbackParams = new URL(callbackUrl).searchParams;
   const code = callbackParams.get('code');
   const returnedState = callbackParams.get('state');
@@ -171,7 +177,6 @@ export async function initiateLogin(webId: string, staticClientId?: string): Pro
     throw new Error(`Auth failed: ${error} - ${errorDesc}`);
   }
 
-  // Handle the redirect (exchange code for tokens)
   return handleRedirect(code, returnedState, iss || oidcConfig.issuer);
 }
 

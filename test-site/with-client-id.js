@@ -1,93 +1,137 @@
-async function init() {
-  var clientIdEl = document.getElementById('client-id-display');
-  var webidInput = document.getElementById('webid-input');
-  var loginBtn = document.getElementById('login-btn');
-  var webidEl = document.getElementById('webid');
-  var fetchResultEl = document.getElementById('fetch-result');
-  var statusEl = document.getElementById('status');
+var PRIVATE_URL_TEMPLATE = function (webId) {
+  return webId.split('/profile/')[0] + '/shared/note';
+};
 
-  if (!window.solid) {
-    statusEl.textContent = 'Solid extension not detected';
-    statusEl.className = 'error';
+var ICONS = {
+  idle: '–',
+  spinner: '', // rendered as a CSS-spin div
+  check: '\u2713',
+  cross: '\u2717',
+};
+
+var clientIdEl = document.getElementById('client-id-display');
+var webidEl = document.getElementById('webid');
+var accessBtn = document.getElementById('access-btn');
+var statusIconEl = document.getElementById('status-icon');
+var statusTextEl = document.getElementById('status-text');
+var fetchResultEl = document.getElementById('fetch-result');
+
+function setStatus(state, text) {
+  statusIconEl.className = 'status-icon ' + (state === 'loading' ? 'idle' : state);
+  if (state === 'loading') {
+    statusIconEl.innerHTML = '';
+    var spin = document.createElement('div');
+    spin.className = 'spinner';
+    statusIconEl.appendChild(spin);
+  } else if (state === 'success') {
+    statusIconEl.textContent = ICONS.check;
+  } else if (state === 'error') {
+    statusIconEl.textContent = ICONS.cross;
+  } else {
+    statusIconEl.textContent = ICONS.idle;
+  }
+  statusTextEl.textContent = text;
+  statusTextEl.className = 'status-text ' + (state === 'error' ? 'error' : 'muted');
+}
+
+async function fetchPrivateResource() {
+  var webId = window.solid && window.solid.webId;
+  if (!webId) {
+    setStatus('error', 'Not signed in to the extension. Open the extension popup to sign in.');
     return;
   }
 
-  statusEl.textContent = 'Extension detected. Loading client ID...';
+  accessBtn.disabled = true;
+  setStatus('loading', 'Signing into the application…');
+  fetchResultEl.textContent = '';
+  fetchResultEl.className = 'waiting';
 
-  // Fetch the client ID from the server config
+  var url = PRIVATE_URL_TEMPLATE(webId);
+
+  async function performFetch() {
+    var response = await window.solid.fetch(url);
+    if (response.ok) {
+      var text = await response.text();
+      setStatus('success', 'Signed in. Private resource fetched.');
+      fetchResultEl.textContent = text;
+      fetchResultEl.className = '';
+    } else {
+      setStatus('error', 'Fetch denied: HTTP ' + response.status + ' ' + response.statusText);
+      fetchResultEl.textContent = 'HTTP ' + response.status + ': ' + response.statusText;
+      fetchResultEl.className = 'error';
+    }
+  }
+
+  try {
+    await performFetch();
+  } catch (err) {
+    // The extension's silent re-auth failed (e.g. first-ever use of this
+    // client ID means the IdP needs explicit consent). Fall back to an
+    // interactive solid.login() which reuses the existing SSO cookie and
+    // usually only surfaces a one-time consent screen.
+    if (err && /Not authenticated/i.test(err.message)) {
+      setStatus('loading', 'One-time consent required. Completing sign-in…');
+      try {
+        await window.solid.login(webId);
+        setStatus('loading', 'Signed in. Fetching private resource…');
+        await performFetch();
+      } catch (loginErr) {
+        setStatus('error', 'Sign-in failed: ' + (loginErr && loginErr.message || loginErr));
+      }
+    } else {
+      setStatus('error', 'Fetch error: ' + (err && err.message || err));
+    }
+  } finally {
+    accessBtn.disabled = false;
+  }
+}
+
+async function init() {
+  if (!window.solid) {
+    webidEl.textContent = 'Solid extension not detected in this browser.';
+    webidEl.className = 'error';
+    setStatus('error', 'Install and enable the Solid extension to continue.');
+    return;
+  }
+
   try {
     var configRes = await fetch('/config.json');
     var config = await configRes.json();
-
     if (config.clientIdUrl) {
       window.solid.setClientId(config.clientIdUrl);
       clientIdEl.textContent = config.clientIdUrl;
       clientIdEl.className = '';
-      statusEl.textContent = 'Client ID set. Enter your WebID and click Login.';
     } else {
-      clientIdEl.textContent = 'No client ID configured on this server';
+      clientIdEl.textContent = 'Server has no clientIdUrl in config.';
       clientIdEl.className = 'error';
-      statusEl.textContent = 'Server has no clientIdUrl in config.';
-      statusEl.className = 'error';
     }
   } catch (err) {
     clientIdEl.textContent = 'Failed to load config: ' + err.message;
     clientIdEl.className = 'error';
-    statusEl.textContent = 'Config error';
-    statusEl.className = 'error';
-    return;
   }
 
-  // Login button handler
-  loginBtn.addEventListener('click', async function () {
-    var webId = webidInput.value.trim();
-    if (!webId) return;
+  accessBtn.addEventListener('click', fetchPrivateResource);
 
-    statusEl.textContent = 'Logging in...';
-    statusEl.className = '';
-
-    try {
-      await window.solid.login(webId);
-    } catch (err) {
-      statusEl.textContent = 'Login error: ' + err.message;
-      statusEl.className = 'error';
-      return;
-    }
-  });
-
-  // Poll for authentication state
-  var interval = setInterval(async function () {
+  // Poll for the signed-in WebID — the extension broadcasts it once its
+  // session is restored.
+  var interval = setInterval(function () {
     if (!window.solid.webId) return;
     clearInterval(interval);
-
     webidEl.textContent = window.solid.webId;
     webidEl.className = '';
-
-    var podRoot = window.solid.webId.split('/profile/')[0] + '/';
-    var privateUrl = podRoot + 'private/notes';
-
-    statusEl.textContent = 'Authenticated! Fetching private resource...';
-
-    try {
-      var response = await window.solid.fetch(privateUrl);
-      if (response.ok) {
-        var text = await response.text();
-        fetchResultEl.textContent = text;
-        fetchResultEl.className = '';
-        statusEl.textContent = 'Private resource fetched successfully!';
-      } else {
-        fetchResultEl.textContent = 'HTTP ' + response.status + ': ' + response.statusText;
-        fetchResultEl.className = 'error';
-        statusEl.textContent = 'Fetch failed';
-        statusEl.className = 'error';
-      }
-    } catch (err) {
-      fetchResultEl.textContent = err.message;
-      fetchResultEl.className = 'error';
-      statusEl.textContent = 'Fetch error';
-      statusEl.className = 'error';
-    }
+    accessBtn.disabled = false;
+    setStatus('idle', 'Click the button to fetch the private note.');
   }, 200);
+
+  // If the user is not signed in to the extension, surface a hint after a
+  // short timeout so the button isn't silently disabled forever.
+  setTimeout(function () {
+    if (!window.solid.webId) {
+      webidEl.textContent = 'Not signed in to the extension.';
+      webidEl.className = 'error';
+      setStatus('error', 'Open the extension popup and sign in to continue.');
+    }
+  }, 2000);
 }
 
 init();

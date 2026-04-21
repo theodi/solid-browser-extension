@@ -9,20 +9,19 @@ const TEST_WEBID = 'http://localhost:3000/test-pod/profile/card#me';
 export async function completeOidcLogin(loginPage: Page) {
   await loginPage.waitForLoadState('networkidle');
 
-  // CSS auto-redirects to password login page
-  // Wait for the submit button to be enabled (CSS uses JS to enable it)
-  await loginPage.waitForSelector('button[type="submit"]:not([disabled])', { timeout: 10_000 });
+  // If the IdP already has a valid SSO cookie (e.g. from a previous login
+  // in this context) CSS skips the password step and drops straight onto
+  // the consent page. Detect both cases.
+  const onConsent = loginPage.url().includes('/.account/oidc/consent');
+  if (!onConsent) {
+    await loginPage.waitForSelector('button[type="submit"]:not([disabled])', { timeout: 10_000 });
+    await loginPage.fill('#email', 'test@example.com');
+    await loginPage.fill('#password', 'test-password-123');
+    await loginPage.click('button[type="submit"]');
+    await loginPage.waitForURL('**/.account/oidc/consent/**', { timeout: 10_000 });
+    await loginPage.waitForLoadState('networkidle');
+  }
 
-  // Fill in credentials
-  await loginPage.fill('#email', 'test@example.com');
-  await loginPage.fill('#password', 'test-password-123');
-  await loginPage.click('button[type="submit"]');
-
-  // Wait for consent page to load
-  await loginPage.waitForURL('**/.account/oidc/consent/**', { timeout: 10_000 });
-  await loginPage.waitForLoadState('networkidle');
-
-  // Wait for the Authorize button to be enabled (JS populates WebIDs then enables it)
   await loginPage.waitForSelector('#authorize:not([disabled])', { timeout: 10_000 });
   await loginPage.click('#authorize');
 }

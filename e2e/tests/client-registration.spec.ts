@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures';
-import { completeOidcLogin } from './helpers';
+import { completeOidcLogin, performLogin } from './helpers';
 
 const TEST_SITE = 'http://localhost:8080';
 const APP_SITE = 'http://localhost:8081';
@@ -25,30 +25,92 @@ test('extension client ID: default login uses the extension client identifier', 
   await expect(page.locator('#fetch-result')).toContainText('Private Note', { timeout: 15_000 });
 });
 
-test('app client ID: private resource is denied when a non-extension client identifier is used', async ({ context, extensionId }) => {
-  // Navigate to the app site (port 8081) which sets its own client ID
+test('app client ID: private/notes is denied when the app client identifier is used', async ({ context, extensionId }) => {
+  // Sign into the extension first (extension client ID is consented at the IdP).
+  await performLogin(context, extensionId);
+
+  // Navigate to the app site so it registers its own client ID.
   const page = await context.newPage();
   await page.goto(`${APP_SITE}/with-client-id.html`);
-
-  // Wait for the extension to inject window.solid and the app to set the client ID
   await page.waitForFunction(
-    () => typeof (window as any).solid !== 'undefined',
+    () => typeof (window as { solid?: unknown }).solid !== 'undefined',
     null,
     { timeout: 5_000 },
   );
+  await expect(page.locator('#client-id-display')).toContainText('8081', { timeout: 5_000 });
 
-  // The app fetches /config.json which returns its client ID (http://localhost:8081/client-id)
-  // and calls solid.setClientId() automatically. Trigger login from the page.
+  // The pod's ACP denies the 8081 client for /private/notes. Calling
+  // solid.fetch directly (bypassing the demo UI which uses /shared/note)
+  // lets us assert the security behaviour regardless of the page markup.
+  // The extension may need an interactive consent for this client — do a
+  // one-shot solid.login to grant it, mirroring what the app UI does on
+  // first visit.
   const loginPagePromise = context.waitForEvent('page');
   await page.evaluate((webId) => {
-    (window as any).solid.login(webId);
+    // Fire-and-forget: the evaluate must return immediately so the test can
+    // interact with the auth popup; solid.login resolves asynchronously.
+    void (window as unknown as {
+      solid: { login: (w: string) => Promise<void> };
+    }).solid.login(webId);
   }, TEST_WEBID);
-
   await completeOidcLogin(await loginPagePromise);
 
-  // The pod's ACP for `private/notes` denies any client that is not the
-  // extension's client identifier, so the app's authenticated fetch must
-  // be forbidden even though the logged-in agent owns the pod.
-  await expect(page.locator('#fetch-result')).toContainText('HTTP 403', { timeout: 15_000 });
-  await expect(page.locator('#fetch-result')).not.toContainText('Private Note');
+  // After the consent flow settles the session for the 8081 client, issue
+  // the fetch and expect the ACP to deny it with 403.
+  await expect.poll(async () =>
+    page.evaluate(async () => {
+      try {
+        const res = await (window as unknown as {
+          solid: { fetch: (url: string) => Promise<Response> };
+        }).solid.fetch('http://localhost:3000/test-pod/private/notes');
+        return res.status;
+      } catch {
+        return -1;
+      }
+    }),
+  { timeout: 15_000 }).toBe(403);
+});
+
+test('reactive auth: clicking Access triggers silent re-auth and fetches the private resource', async ({
+  context,
+  extensionId,
+}) => {
+  // Pre-consent the app client ID by running one interactive login. Covers
+  // OIDC consent_required; subsequent fetches from this origin go silent.
+  await performLogin(context, extensionId);
+
+  const page = await context.newPage();
+  await page.goto(`${APP_SITE}/with-client-id.html`);
+  await expect(page.locator('#client-id-display')).toContainText('8081', { timeout: 5_000 });
+  await expect(page.locator('#webid')).toContainText('test-pod', { timeout: 10_000 });
+
+  // First click: the extension has no session for 8081 yet and the IdP
+  // requires consent, so the app's interactive fallback (solid.login) kicks
+  // in. Complete the consent page that pops up.
+  const loginPagePromise = context.waitForEvent('page');
+  await page.click('#access-btn');
+  await completeOidcLogin(await loginPagePromise);
+
+  // After consent, the fetch should succeed and the UI should reflect it.
+  await expect(page.locator('#status-text')).toContainText('Private resource fetched', { timeout: 15_000 });
+  await expect(page.locator('#fetch-result')).toContainText('Shared Note', { timeout: 5_000 });
+  await expect(page.locator('#status-icon')).toHaveClass(/success/);
+
+  // Second click: truly reactive + silent. No login/consent page should open.
+  const unwantedPages: string[] = [];
+  const onPage = (p: { url: () => string }) => {
+    const url = p.url();
+    if (url.includes('/.account/') || url.includes('oidc/consent')) {
+      unwantedPages.push(url);
+    }
+  };
+  context.on('page', onPage);
+
+  await page.click('#access-btn');
+  await expect(page.locator('#status-text')).toContainText('Private resource fetched', { timeout: 10_000 });
+  await expect(page.locator('#fetch-result')).toContainText('Shared Note');
+
+  await page.waitForTimeout(500);
+  expect(unwantedPages).toEqual([]);
+  context.off('page', onPage);
 });

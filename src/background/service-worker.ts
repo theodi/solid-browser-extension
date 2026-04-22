@@ -27,6 +27,7 @@ interface SessionContext {
 
 const sessionCache = new Map<string, SessionContext>();
 const pendingSilentAuth = new Map<string, Promise<SessionContext | null>>();
+const pendingInteractiveAuth = new Map<string, Promise<SessionContext | null>>();
 
 async function resolveClientIdForOrigin(origin: string | undefined): Promise<string> {
   if (!origin) return EXTENSION_CLIENT_ID;
@@ -77,6 +78,41 @@ async function silentlyAuthenticate(clientId: string): Promise<SessionContext | 
   return promise;
 }
 
+async function interactivelyAuthenticate(clientId: string): Promise<SessionContext | null> {
+  const webId = await loadActiveWebId();
+  if (!webId) return null;
+
+  const existing = pendingInteractiveAuth.get(clientId);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<SessionContext | null> => {
+    try {
+      const session = await initiateLogin(webId, clientId);
+      // Recheck the active WebID in case the user logged out / switched
+      // accounts while the consent popup was open.
+      const currentActive = await loadActiveWebId();
+      if (currentActive !== session.webId) {
+        await clearSessionForClient(clientId);
+        return null;
+      }
+      const keyPair = await importDpopKeyPair(session.dpopKeyPair);
+      const ctx: SessionContext = { session, keyPair };
+      sessionCache.set(clientId, ctx);
+      return ctx;
+    } catch {
+      // The user dismissed the consent popup, or chrome.identity could not
+      // complete the flow. The originating fetch will surface this as
+      // "Not authenticated".
+      return null;
+    } finally {
+      pendingInteractiveAuth.delete(clientId);
+    }
+  })();
+
+  pendingInteractiveAuth.set(clientId, promise);
+  return promise;
+}
+
 async function refreshIfNeeded(
   clientId: string,
   ctx: SessionContext,
@@ -100,14 +136,25 @@ async function ensureSessionForClient(clientId: string): Promise<SessionContext 
     return refreshIfNeeded(clientId, ctx);
   }
 
-  // No stored session for this client ID. Broker a per-client session via
-  // silent OIDC re-auth (prompt=none) — this is the token-broker contract:
-  // the extension holds the master session, and each app gets its own scoped
-  // session keyed to its own clientId. We deliberately do NOT fall back to
-  // another client's session, because that would leak the master identity's
-  // OIDC scope into the app and defeat the Identity Isolation guarantee.
+  // No stored session for this client ID. Broker a per-client session —
+  // this is the token-broker contract: the extension holds the master
+  // session, and each app gets its own scoped session keyed to its own
+  // clientId. We deliberately do NOT fall back to another client's session,
+  // because that would leak the master identity's OIDC scope into the app
+  // and defeat the Identity Isolation guarantee.
+  //
+  // First try silent OIDC re-auth (prompt=none). That succeeds for clients
+  // the user has already consented to at the IdP (e.g. after a previous
+  // interactive auth in this browser). When the IdP still requires explicit
+  // consent for this client ID, silent fails and we fall back to an
+  // interactive consent flow (prompt=consent, chrome.identity popup) so the
+  // user can authorize the app's clientId once. Subsequent fetches from the
+  // same origin then use the cached per-client session and run silently.
   const silent = await silentlyAuthenticate(clientId);
   if (silent) return refreshIfNeeded(clientId, silent);
+
+  const interactive = await interactivelyAuthenticate(clientId);
+  if (interactive) return refreshIfNeeded(clientId, interactive);
   return null;
 }
 
@@ -227,6 +274,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (previousWebId && previousWebId !== session.webId) {
           sessionCache.clear();
           pendingSilentAuth.clear();
+          pendingInteractiveAuth.clear();
           await clearAllSessions();
           // initiateLogin already persisted this session; re-save after purging the old user's map.
           await saveSession(session);
@@ -279,6 +327,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'SOLID_LOGOUT') {
     sessionCache.clear();
     pendingSilentAuth.clear();
+    pendingInteractiveAuth.clear();
     Promise.all([clearAllSessions(), clearActiveWebId(), clearProfile()])
       .then(() => {
         broadcastStateChange(null);

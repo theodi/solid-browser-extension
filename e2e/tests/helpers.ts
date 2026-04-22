@@ -9,16 +9,29 @@ const TEST_WEBID = 'http://localhost:3000/test-pod/profile/card#me';
 export async function completeOidcLogin(loginPage: Page) {
   await loginPage.waitForLoadState('networkidle');
 
-  // If the IdP already has a valid SSO cookie (e.g. from a previous login
-  // in this context) CSS skips the password step and drops straight onto
-  // the consent page. Detect both cases.
+  // Three possible landing URLs:
+  //   1. Login form (new session, no SSO cookie)
+  //   2. Consent page (SSO cookie valid but client not yet consented)
+  //   3. Callback/closed (CSS configured without a consent prompt, e.g. via
+  //      the e2e consent-skip patch — the auth flow ends silently)
   const onConsent = loginPage.url().includes('/.account/oidc/consent');
   if (!onConsent) {
-    await loginPage.waitForSelector('button[type="submit"]:not([disabled])', { timeout: 10_000 });
+    try {
+      await loginPage.waitForSelector('button[type="submit"]:not([disabled])', { timeout: 5_000 });
+    } catch {
+      // No login form appeared — the flow already finished (consent-less IdP).
+      return;
+    }
     await loginPage.fill('#email', 'test@example.com');
     await loginPage.fill('#password', 'test-password-123');
-    await loginPage.click('button[type="submit"]');
-    await loginPage.waitForURL('**/.account/oidc/consent/**', { timeout: 10_000 });
+    await Promise.all([
+      loginPage.click('button[type="submit"]'),
+      Promise.race([
+        loginPage.waitForURL('**/.account/oidc/consent/**', { timeout: 10_000 }),
+        loginPage.waitForEvent('close', { timeout: 10_000 }),
+      ]),
+    ]);
+    if (loginPage.isClosed()) return;
     await loginPage.waitForLoadState('networkidle');
   }
 

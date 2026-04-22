@@ -10,6 +10,15 @@ const CSS_BASE_URL = `http://localhost:${CSS_PORT}`;
 export async function startCSSServer(): Promise<void> {
   const seedConfig = path.resolve(__dirname, 'seed.json');
   const cssConfig = path.resolve(__dirname, 'css-config.json');
+  const skipConsentPatch = path.resolve(__dirname, 'skip-consent-patch.cjs');
+
+  // Load a --require patch that removes the OIDC consent prompt from the
+  // CSS interaction policy. The extension's per-client silent re-auth
+  // (prompt=none) then succeeds without the IdP pausing for a consent
+  // screen, which is required to demonstrate per-client identity in e2e.
+  const nodeOptions = [process.env.NODE_OPTIONS, `--require ${skipConsentPatch}`]
+    .filter(Boolean)
+    .join(' ');
 
   serverProcess = spawn('npx', [
     '@solid/community-server',
@@ -19,7 +28,7 @@ export async function startCSSServer(): Promise<void> {
     '-l', 'warn',
   ], {
     stdio: 'pipe',
-    env: { ...process.env },
+    env: { ...process.env, NODE_OPTIONS: nodeOptions },
   });
 
   serverProcess.stderr?.on('data', (data: Buffer) => {

@@ -17,19 +17,30 @@ Page (MAIN world)  <--postMessage-->  Content Script (ISOLATED)  <--chrome.runti
 - **auth-flow.ts**: Manual OIDC flow adapted for service worker; exposes `initiateLogin` (interactive, `prompt=consent`) and `initiateSilentLogin` (non-interactive, `prompt=none`)
 - **session-database.ts**: Persists a `{ clientId → StoredSession }` map plus a shared `active WebID` in `chrome.storage.local`
 
-### Multi-client sessions and fetch fallback
+## Architectural Requirements
 
-A single signed-in WebID can have multiple concurrent sessions, one per client identifier. When a `solid.fetch()` arrives, the service worker resolves the effective client ID for the page's origin and looks for a matching session in this order:
-
-1. Exact match in the per-client session map.
-2. Silent OIDC re-auth (`prompt=none`) — succeeds only if the user has previously consented to that client ID at the IdP.
-3. **Fallback to any existing session**, preferring the extension's own client session.
-
-The fallback is what makes the UX pleasant: a page that sets its own client ID via `solid.setClientId()` does **not** trigger a consent popup on first visit. It just reuses the extension's already-authenticated identity. Pages that actually need per-client identity (distinct `azp` claim) can opt in by calling `solid.login()` explicitly — that establishes a dedicated session for their client ID, and every subsequent fetch from that origin uses it.
+- **Authentication Model**: Implement a **Token Broker** architecture. The extension acts as the primary holder of the Solid session, while web applications request scoped access via the extension.
+- **Injected API**: Every web page must have a `window.solid` object injected with the following interface:
+  - `fetch(url, init)`: Intercepts or proxies requests to ensure they are signed/authenticated using the correct session.
+  - `webId`: A getter that returns the currently logged-in WebID.
+  - `setClientId(clientId)`: Allows the web application to declare its Identity.
+  - `clientId`: A getter that returns the client id
+  - `login()`: Triggers the authentication flow. This must be **silent** (no visible UI/redirects for the app) if the extension already has a valid session.
+  - `logout()`: Clears the session state for that specific application.
+- **Permission Scoping**: 
+  - The extension holds "High Permission" (long-lived/refresh tokens).
+  - Each application must use its own `clientId` to ensure it operates within its own OIDC permission scope.
+- **Silent Integration Rules**: Support a "managed" application flow where the extension intercepts OIDC redirects or uses background communication to bypass the standard web-based login UI.
+- **Reactive Authentication & Session Management**: The extension must not automatically authenticate every tab. Sessions for external applications should be initialized **reactively** only when the application calls `login()` or attempts an authenticated `fetch()`.
 
 ## Auth Library
 
 Uses `@uvdsl/solid-oidc-client-browser/core`. The `login()` method is bypassed (uses `window.location.href`) — we manually construct the auth URL and use `chrome.tabs.create()`. `authFetch()` and `restore()` are used directly.
+
+## Resources
+
+- Solid-OIDC specification https://solidproject.org/TR/oidc-primer
+- https://docs.inrupt.com/sdk/java-sdk/authentication/solid-oidc-client-identifiers
 
 ## Build & Test
 
@@ -46,6 +57,21 @@ npm run test:e2e      # Build + run Playwright e2e tests
 - Uses Community Solid Server on localhost:3000 with in-memory storage
 - Test site served on a separate port
 - Extension loaded from `dist/` via `--load-extension`
+
+### Specific Test Scenario: Identity Isolation (The 403 Test)
+
+The system must pass a behavioral test ensuring that authentication does not imply universal authorization:
+
+1.  **Extension Login**: The user logs into the Solid Extension directly using the WebId.
+2.  **High-Privilege Verification**: A "Solid Extension Test" page (internal) must successfully access a private Pod resource to prove the master session is active.
+3.  **App-Specific Silent Login**: 
+    - A separate "Solid Test - App with Client ID" page triggers a private resource access.
+    - The extension must detect this, perform a **silent background login** using the App's specific `clientId`.
+    - The extension must return a session/token to the App that identifies it as the user, but restricted to that App's identity.
+4.  **Verification of Failure (403 Expected)**:
+    - The App makes the request to the private resource.
+    - **Expectation**: The request must return a **403 Forbidden** error.
+    - **Reasoning**: This confirms the extension correctly brokered a scoped session for the App (Authenticated) but did not leak the user's master permissions (which would have resulted in a 200 OK).
 
 ## Skills
 

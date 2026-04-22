@@ -25,6 +25,12 @@ export const test = base.extend<{
     if (!sw) {
       sw = await context.waitForEvent('serviceworker');
     }
+    if (process.env.SW_CONSOLE) {
+      sw.on('console', (msg) => {
+        // eslint-disable-next-line no-console
+        console.log('[SW]', msg.type(), msg.text());
+      });
+    }
     const extensionId = sw.url().split('/')[2];
     await use(extensionId);
   },

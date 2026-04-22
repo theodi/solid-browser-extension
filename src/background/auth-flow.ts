@@ -151,15 +151,18 @@ async function runAuthFlow(
 
   const authUrl = `${oidcConfig.authorization_endpoint}?${params.toString()}`;
 
+  console.log('[auth-flow] launch', { clientId, prompt, interactive });
   const callbackUrl = await new Promise<string>((resolve, reject) => {
     chrome.identity.launchWebAuthFlow(
       { url: authUrl, interactive },
       (responseUrl) => {
         if (chrome.runtime.lastError) {
+          console.warn('[auth-flow] error', chrome.runtime.lastError.message);
           reject(new Error(chrome.runtime.lastError.message));
         } else if (!responseUrl) {
           reject(new Error('No response URL from auth flow'));
         } else {
+          console.log('[auth-flow] callback', responseUrl);
           resolve(responseUrl);
         }
       }

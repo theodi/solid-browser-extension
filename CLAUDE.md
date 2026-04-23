@@ -60,18 +60,9 @@ npm run test:e2e      # Build + run Playwright e2e tests
 
 ### Specific Test Scenario: Identity Isolation (The 403 Test)
 
-The system must pass a behavioral test ensuring that authentication does not imply universal authorization:
-
-1.  **Extension Login**: The user logs into the Solid Extension directly using the WebId.
-2.  **High-Privilege Verification**: A "Solid Extension Test" page (internal) must successfully access a private Pod resource to prove the master session is active.
-3.  **App-Specific Silent Login**: 
-    - A separate "Solid Test - App with Client ID" page triggers a private resource access.
-    - The extension must detect this, perform a **silent background login** using the App's specific `clientId`.
-    - The extension must return a session/token to the App that identifies it as the user, but restricted to that App's identity.
-4.  **Verification of Failure (403 Expected)**:
-    - The App makes the request to the private resource.
-    - **Expectation**: The request must return a **403 Forbidden** error.
-    - **Reasoning**: This confirms the extension correctly brokered a scoped session for the App (Authenticated) but did not leak the user's master permissions (which would have resulted in a 200 OK).
+Identity isolation is a core acceptance invariant: a per-app client ID must never inherit the extension's master permission scope.
+When an app origin uses its own client ID and fetches a private Pod resource, the request must be authenticated under that app-scoped session and return **403 Forbidden** when ACP denies that app.
+See the canonical behavioral spec in `e2e/tests/client-registration.spec.ts` (test: "identity isolation: app client ID gets a silently brokered per-client session and is denied by the pod ACP").
 
 ## Skills
 

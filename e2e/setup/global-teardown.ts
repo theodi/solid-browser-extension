@@ -1,5 +1,5 @@
+import type http from 'node:http';
 import { stopCSSServer } from './css-server';
-import type http from 'http';
 
 async function globalTeardown() {
   await stopCSSServer();

@@ -1,47 +1,45 @@
 import type { BrowserContext, Page } from '@playwright/test';
 
-const TEST_WEBID = 'http://localhost:3000/test-pod/profile/card#me';
+/** The seeded CSS test WebID (see e2e/setup/seed.json). */
+export const TEST_WEBID = 'http://localhost:3000/test-pod/profile/card#me';
 
 /**
- * Complete the CSS OIDC login + consent flow on an already-opened login page.
- * The page should be the CSS login page opened by chrome.identity.launchWebAuthFlow.
+ * Complete the CSS OIDC login + consent flow on the window
+ * `chrome.identity.launchWebAuthFlow` opened. CSS auto-redirects to the password page,
+ * then to consent; both have JS-enabled submit buttons we wait on.
  */
-export async function completeOidcLogin(loginPage: Page) {
+export async function completeOidcLogin(loginPage: Page): Promise<void> {
   await loginPage.waitForLoadState('networkidle');
-
-  // CSS auto-redirects to password login page
-  // Wait for the submit button to be enabled (CSS uses JS to enable it)
   await loginPage.waitForSelector('button[type="submit"]:not([disabled])', { timeout: 10_000 });
-
-  // Fill in credentials
   await loginPage.fill('#email', 'test@example.com');
   await loginPage.fill('#password', 'test-password-123');
   await loginPage.click('button[type="submit"]');
 
-  // Wait for consent page to load
   await loginPage.waitForURL('**/.account/oidc/consent/**', { timeout: 10_000 });
   await loginPage.waitForLoadState('networkidle');
-
-  // Wait for the Authorize button to be enabled (JS populates WebIDs then enables it)
   await loginPage.waitForSelector('#authorize:not([disabled])', { timeout: 10_000 });
   await loginPage.click('#authorize');
 }
 
 /**
- * Perform a full login flow via the extension popup using dynamic registration.
+ * Drive a full login through the extension popup. Opens the popup, enters the WebID,
+ * completes the CSS OIDC flow in the launched window, then reopens the popup and waits
+ * for the signed-in state (the <jeswr-account-menu> appears in #signed-in).
  */
-export async function performLogin(context: BrowserContext, extensionId: string) {
+export async function performLogin(
+  context: BrowserContext,
+  extensionId: string,
+  webId: string = TEST_WEBID,
+): Promise<void> {
   const popupPage = await context.newPage();
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
-  await popupPage.fill('#webid-input', TEST_WEBID);
+  await popupPage.fill('#webid-input', webId);
 
   const loginPagePromise = context.waitForEvent('page');
   await popupPage.click('#login-btn');
-
   await completeOidcLogin(await loginPagePromise);
 
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
-  await popupPage.locator('#logged-in-view').waitFor({ state: 'visible', timeout: 15_000 });
-
+  await popupPage.locator('#signed-in').waitFor({ state: 'visible', timeout: 15_000 });
   await popupPage.close();
 }

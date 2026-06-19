@@ -1,11 +1,11 @@
-import { test as base, chromium, type BrowserContext } from '@playwright/test';
-import path from 'path';
+import path from 'node:path';
+import { type BrowserContext, test as base, chromium } from '@playwright/test';
 
 export const test = base.extend<{
   context: BrowserContext;
   extensionId: string;
 }>({
-  // eslint-disable-next-line no-empty-pattern
+  // biome-ignore lint/correctness/noEmptyPattern: Playwright's fixture-deps signature.
   context: async ({}, use) => {
     const pathToExtension = path.resolve(__dirname, '../dist');
     const context = await chromium.launchPersistentContext('', {

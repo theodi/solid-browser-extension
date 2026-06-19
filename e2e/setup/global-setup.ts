@@ -1,8 +1,7 @@
+import path from 'node:path';
 import { chromium } from 'playwright';
-import path from 'path';
-import { startCSSServer } from './css-server';
 import { startTestSiteServer } from '../../test-site/server';
-import type http from 'http';
+import { startCSSServer } from './css-server';
 
 const TEST_SITE_PORT = 8080;
 const APP_SITE_PORT = 8081;
@@ -12,10 +11,7 @@ async function discoverExtensionId(): Promise<string> {
   const ctx = await chromium.launchPersistentContext('', {
     channel: 'chromium',
     headless: false,
-    args: [
-      `--disable-extensions-except=${extPath}`,
-      `--load-extension=${extPath}`,
-    ],
+    args: [`--disable-extensions-except=${extPath}`, `--load-extension=${extPath}`],
   });
   let sw = ctx.serviceWorkers()[0];
   if (!sw) sw = await ctx.waitForEvent('serviceworker');

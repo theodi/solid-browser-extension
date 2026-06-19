@@ -1,9 +1,9 @@
+import { type ChildProcess, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { chromium } from 'playwright';
-import { spawn, type ChildProcess } from 'child_process';
-import path from 'path';
-import fs from 'fs';
-import os from 'os';
-import http from 'http';
 import { startTestSiteServer } from '../test-site/server';
 
 const CSS_PORT = 3000;
@@ -27,9 +27,15 @@ async function waitForServer(url: string, timeoutMs = 30_000) {
   while (Date.now() - start < timeoutMs) {
     try {
       await new Promise<void>((resolve, reject) => {
-        const req = http.get(url, (res) => { res.resume(); resolve(); });
+        const req = http.get(url, (res) => {
+          res.resume();
+          resolve();
+        });
         req.on('error', reject);
-        req.setTimeout(1000, () => { req.destroy(); reject(); });
+        req.setTimeout(1000, () => {
+          req.destroy();
+          reject();
+        });
       });
       return;
     } catch {
@@ -40,10 +46,7 @@ async function waitForServer(url: string, timeoutMs = 30_000) {
 }
 
 const extPath = path.join(ROOT, 'dist');
-const extArgs = [
-  `--disable-extensions-except=${extPath}`,
-  `--load-extension=${extPath}`,
-];
+const extArgs = [`--disable-extensions-except=${extPath}`, `--load-extension=${extPath}`];
 
 async function discoverExtensionId(userDataDir: string): Promise<string> {
   const ctx = await chromium.launchPersistentContext(userDataDir, {
@@ -74,18 +77,28 @@ function pinExtension(userDataDir: string, extensionId: string) {
   console.log('Building extension...');
   const build = spawn('npx', ['webpack'], { cwd: ROOT, stdio: 'inherit' });
   await new Promise<void>((resolve, reject) => {
-    build.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Build failed (${code})`))));
+    build.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`Build failed (${code})`)),
+    );
   });
 
   // 2. Start CSS
   console.log('Starting Community Solid Server...');
-  const css = spawn('npx', [
-    '@solid/community-server',
-    '-p', String(CSS_PORT),
-    '-c', path.join(ROOT, 'e2e/setup/css-config.json'),
-    '--seedConfig', path.join(ROOT, 'e2e/setup/seed.json'),
-    '-l', 'warn',
-  ], { stdio: 'pipe' });
+  const css = spawn(
+    'npx',
+    [
+      '@solid/community-server',
+      '-p',
+      String(CSS_PORT),
+      '-c',
+      path.join(ROOT, 'e2e/setup/css-config.json'),
+      '--seedConfig',
+      path.join(ROOT, 'e2e/setup/seed.json'),
+      '-l',
+      'warn',
+    ],
+    { stdio: 'pipe' },
+  );
   children.push(css);
   css.stderr?.on('data', (d: Buffer) => {
     const msg = d.toString();
@@ -131,7 +144,7 @@ function pinExtension(userDataDir: string, extensionId: string) {
     args: extArgs,
   });
 
-  const page1 = context.pages()[0] || await context.newPage();
+  const page1 = context.pages()[0] || (await context.newPage());
   await page1.goto(`http://localhost:${BASIC_SITE_PORT}/`);
 
   const page2 = await context.newPage();

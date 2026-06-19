@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from 'child_process';
-import path from 'path';
-import http from 'http';
+import { type ChildProcess, spawn } from 'node:child_process';
+import http from 'node:http';
+import path from 'node:path';
 
 let serverProcess: ChildProcess | null = null;
 
@@ -11,16 +11,24 @@ export async function startCSSServer(): Promise<void> {
   const seedConfig = path.resolve(__dirname, 'seed.json');
   const cssConfig = path.resolve(__dirname, 'css-config.json');
 
-  serverProcess = spawn('npx', [
-    '@solid/community-server',
-    '-p', String(CSS_PORT),
-    '-c', cssConfig,
-    '--seedConfig', seedConfig,
-    '-l', 'warn',
-  ], {
-    stdio: 'pipe',
-    env: { ...process.env },
-  });
+  serverProcess = spawn(
+    'npx',
+    [
+      '@solid/community-server',
+      '-p',
+      String(CSS_PORT),
+      '-c',
+      cssConfig,
+      '--seedConfig',
+      seedConfig,
+      '-l',
+      'warn',
+    ],
+    {
+      stdio: 'pipe',
+      env: { ...process.env },
+    },
+  );
 
   serverProcess.stderr?.on('data', (data: Buffer) => {
     const msg = data.toString();
@@ -65,4 +73,4 @@ async function waitForServer(url: string, timeoutMs: number): Promise<void> {
   throw new Error(`Server at ${url} did not start within ${timeoutMs}ms`);
 }
 
-export { CSS_PORT, CSS_BASE_URL };
+export { CSS_BASE_URL, CSS_PORT };

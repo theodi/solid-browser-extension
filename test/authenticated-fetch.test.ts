@@ -108,6 +108,84 @@ describe('authenticatedFetch — credential boundary', () => {
     expect(headers['X-Keep']).toBe('yes'); // unrelated header preserved
   });
 
+  // The attach-path assertion above is partially masked: that path UNCONDITIONALLY sets its
+  // own Authorization/DPoP after the spread, so neutering `sanitizeHeaders` would not fail it.
+  // The strip is the ONLY guard on the NON-attach (foreign origin / token endpoint) path —
+  // there `safeHeaders` is passed straight to fetch with no overwrite — and it must also be
+  // case-insensitive (page headers can be lower-cased). These assertions prove both, so a
+  // neutered `sanitizeHeaders` genuinely fails (verified by temporarily neutering it).
+  it('strips page-supplied auth headers on the NON-attach (foreign-origin) path — the only guard there', async () => {
+    const session = await makeSession();
+    const fetchImpl = mockFetch(async () => ok());
+    const { authenticated } = await authenticatedFetch(session, {
+      url: 'https://evil.example/collect',
+      method: 'POST',
+      headers: { Authorization: 'Bearer attacker', DPoP: 'forged', 'X-Keep': 'yes' },
+      body: 'x',
+      fetchImpl,
+    });
+
+    expect(authenticated).toBe(false); // foreign origin: sent as a plain fetch, no token
+    const headers = (fetchImpl.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    // No overwrite happens on this path, so if sanitizeHeaders were a no-op these would leak.
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers.DPoP).toBeUndefined();
+    expect(headers['X-Keep']).toBe('yes'); // unrelated header still forwarded to the foreign origin
+  });
+
+  it('strips page-supplied auth headers on the NON-attach (token-endpoint) path', async () => {
+    const session = await makeSession({
+      allowedOrigins: new Set(['https://idp.example']),
+      tokenEndpoint: 'https://idp.example/token',
+    });
+    const fetchImpl = mockFetch(async () => ok());
+    const { authenticated } = await authenticatedFetch(session, {
+      url: 'https://idp.example/token',
+      method: 'POST',
+      headers: { Authorization: 'Bearer attacker', DPoP: 'forged' },
+      fetchImpl,
+    });
+
+    expect(authenticated).toBe(false); // token endpoint: never gets the resource token
+    const headers = (fetchImpl.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers.DPoP).toBeUndefined();
+  });
+
+  it('strips LOWER-CASE page-supplied auth headers (case-insensitive) on the non-attach path', async () => {
+    const session = await makeSession();
+    const fetchImpl = mockFetch(async () => ok());
+    await authenticatedFetch(session, {
+      url: 'https://evil.example/collect',
+      method: 'POST',
+      headers: { authorization: 'Bearer attacker', dpop: 'forged', 'x-keep': 'yes' },
+      body: 'x',
+      fetchImpl,
+    });
+    const headers = (fetchImpl.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    // case-insensitive strip: lower-cased auth headers must not survive on the foreign path
+    expect(headers.authorization).toBeUndefined();
+    expect(headers.dpop).toBeUndefined();
+    expect(headers['x-keep']).toBe('yes');
+  });
+
+  it('strips a LOWER-CASE page-supplied auth header on the attach path too (no duplicate header)', async () => {
+    const session = await makeSession();
+    const fetchImpl = mockFetch(async () => ok());
+    await authenticatedFetch(session, {
+      url: 'https://alice.pod.example/x',
+      method: 'GET',
+      headers: { authorization: 'Bearer attacker', dpop: 'forged' },
+      fetchImpl,
+    });
+    const headers = (fetchImpl.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    // the page's lower-cased copies are stripped, so only our canonical-cased ones remain
+    expect(headers.authorization).toBeUndefined();
+    expect(headers.dpop).toBeUndefined();
+    expect(headers.Authorization).toBe('DPoP access-token-123');
+    expect(typeof headers.DPoP).toBe('string');
+  });
+
   it('retries ONCE on an RFC 9449 §8 nonce challenge with the server nonce', async () => {
     const session = await makeSession();
     let call = 0;

@@ -1,16 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Solid Browser Extension",
-  "version": "0.1.0",
-  "description": "Authenticate with Solid at the browser level",
-  "permissions": [
-    "storage",
-    "activeTab",
-    "identity"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "name": "Solid",
+  "version": "0.2.0",
+  "description": "Sign in to Solid at the browser level — injects window.solid (DPoP-authenticated fetch) and a pinned account menu.",
+  "permissions": ["storage", "identity"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
@@ -23,7 +17,7 @@
   },
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Solid Login",
+    "default_title": "Sign in to Solid",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -43,12 +37,6 @@
       "js": ["content/content-script.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["redirect/redirect.html"],
-      "matches": ["<all_urls>"]
     }
   ]
 }

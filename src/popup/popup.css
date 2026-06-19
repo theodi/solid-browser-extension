@@ -1,260 +1,257 @@
+/* AUTHORED-BY Claude Opus 4.8 */
+/*
+ * Popup theme. The @jeswr/solid-elements web components inherit the app-shell OKLCH
+ * tokens (--background/--foreground/--primary/...) through the shadow boundary, flipped
+ * by the `.dark` class jeswr-theme-toggle sets on <html>. We declare the SAME token set
+ * here (light :root + .dark) so the popup's own chrome themes in lockstep with the
+ * components. These mirror app-shell's light/dark values so the look matches Pod Manager.
+ */
+
 :root {
-  --solid-purple: #7C4DFF;
-  --solid-purple-dark: #651FFF;
-  --solid-purple-light: #B388FF;
-  --text-primary: #1a1a2e;
-  --text-secondary: #555;
-  --bg: #ffffff;
-  --border: #ddd;
-  --error: #d32f2f;
+  --background: oklch(0.992 0.003 210);
+  --foreground: oklch(0.21 0.022 235);
+  --border: oklch(0.91 0.012 220);
+  --muted-foreground: oklch(0.5 0.018 230);
+  --primary: oklch(0.52 0.094 205);
+  --primary-foreground: oklch(0.99 0.005 200);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.022 235);
+  --destructive: oklch(0.55 0.2 27);
+  --accent: oklch(0.94 0.03 195);
+  --accent-foreground: oklch(0.31 0.05 215);
+  --ring: oklch(0.52 0.094 205);
+  --radius: 0.7rem;
+  color-scheme: light;
+}
+
+html.dark {
+  --background: oklch(0.18 0.02 240);
+  --foreground: oklch(0.95 0.01 220);
+  --border: oklch(0.32 0.02 235);
+  --muted-foreground: oklch(0.68 0.02 230);
+  --primary: oklch(0.7 0.12 200);
+  --primary-foreground: oklch(0.16 0.02 240);
+  --popover: oklch(0.22 0.02 240);
+  --popover-foreground: oklch(0.95 0.01 220);
+  --destructive: oklch(0.62 0.2 27);
+  --accent: oklch(0.3 0.04 215);
+  --accent-foreground: oklch(0.9 0.03 200);
+  --ring: oklch(0.7 0.12 200);
+  color-scheme: dark;
 }
 
 * {
-  margin: 0;
-  padding: 0;
   box-sizing: border-box;
 }
 
 body {
-  width: 320px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: var(--bg);
-  color: var(--text-primary);
+  margin: 0;
+  width: 340px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  font-size: 14px;
 }
 
 .container {
-  padding: 24px 20px;
+  padding: 14px 16px 18px;
 }
 
-.header {
+.topbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .logo {
-  width: 36px;
-  height: 36px;
+  width: 26px;
+  height: 26px;
 }
 
-.header h1 {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--solid-purple);
+.brand-name {
+  font-weight: 600;
+  font-size: 15px;
 }
 
 .subtitle {
-  color: var(--text-secondary);
-  font-size: 13px;
-  margin-bottom: 16px;
+  color: var(--muted-foreground);
+  margin: 0 0 12px;
 }
 
-label {
-  display: block;
+.section-label {
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
+  color: var(--muted-foreground);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.04em;
+  margin: 4px 0 6px;
 }
 
-input[type="url"] {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1.5px solid var(--border);
-  border-radius: 8px;
+/* The signed-out WebID form. Scoped so the bare element styles below never leak
+ * onto the @jeswr/solid-elements controls (the suite's CSS-leak guard). */
+#login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+#login-form label {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+#login-form input {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 0.25rem);
+  background: var(--popover);
+  color: var(--foreground);
   font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s;
 }
 
-input[type="url"]:focus {
-  border-color: var(--solid-purple);
+#login-form input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
 }
 
-button {
-  width: 100%;
-  padding: 10px;
+#login-form button.primary {
+  margin-top: 4px;
+  padding: 9px 12px;
   border: none;
-  border-radius: 8px;
+  border-radius: calc(var(--radius) - 0.25rem);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 600;
   font-size: 14px;
-  font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.2s;
 }
 
-#login-btn {
-  margin-top: 12px;
-  background: var(--solid-purple);
-  color: white;
+#login-form button.primary:hover {
+  filter: brightness(1.05);
 }
 
-#login-btn:hover {
-  background: var(--solid-purple-dark);
-}
-
-#logout-btn {
-  margin-top: 16px;
-  background: transparent;
-  color: var(--solid-purple);
-  border: 1.5px solid var(--solid-purple);
-}
-
-#logout-btn:hover {
-  background: var(--solid-purple);
-  color: white;
-}
-
-.error {
-  color: var(--error);
-  font-size: 12px;
-  margin-top: 8px;
-}
-
-.spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--solid-purple-light);
-  border-top-color: var(--solid-purple);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin: 20px auto;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-#loading-view {
-  text-align: center;
-  color: var(--text-secondary);
-}
-
-/* Profile card (logged-in state) */
-
-.profile-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: #f5f0ff;
-  padding: 14px;
-  border-radius: 10px;
-  border: 1px solid var(--solid-purple-light);
-}
-
-.profile-photo {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  object-fit: cover;
-  flex-shrink: 0;
-}
-
-.profile-initials {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: var(--solid-purple);
-  color: white;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.profile-initials:not([hidden]) {
-  display: flex;
-}
-
-.profile-info {
-  min-width: 0;
-}
-
-.profile-name {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Past profiles list */
-
-.past-profiles-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 8px;
-}
-
-.past-profile-item {
+.account-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.15s;
-  border: none;
-  background: none;
   width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 0.2rem);
+  background: var(--popover);
+  color: var(--foreground);
+  cursor: pointer;
+  margin-bottom: 6px;
   text-align: left;
 }
 
-.past-profile-item:hover {
-  background: #f5f0ff;
+.account-item:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 
-.past-profile-photo {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  object-fit: cover;
-  flex-shrink: 0;
-}
-
-.past-profile-initials {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: var(--solid-purple-light);
-  color: white;
+.account-avatar {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 600;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.account-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.account-name {
   font-size: 13px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.past-profile-initials:not([hidden]) {
-  display: flex;
-}
-
-.past-profile-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-primary);
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.add-account-icon {
-  background: var(--border);
-  color: var(--text-secondary);
-  font-size: 18px;
+.error {
+  color: var(--destructive);
+  margin: 8px 0 0;
+  font-size: 13px;
 }
 
-.add-account-btn .past-profile-name {
-  color: var(--text-secondary);
-}
-
-#webid-form-container {
+.shortcuts {
   margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shortcut {
+  color: var(--primary);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.shortcut:hover {
+  text-decoration: underline;
+}
+
+.pin-nudge {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--accent);
+  color: var(--accent-foreground);
+  border-radius: calc(var(--radius) - 0.2rem);
+  font-size: 12.5px;
+}
+
+.link-btn {
+  align-self: flex-end;
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12.5px;
+}
+
+#busy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 22px 0;
+  color: var(--muted-foreground);
+}
+
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

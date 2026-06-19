@@ -12,8 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "webpack",
-    "build:dev": "webpack --mode development --watch",
+    "build": "webpack --config webpack.config.cjs",
+    "build:dev": "webpack --config webpack.config.cjs --mode development --watch",
     "gate": "npm run lint && npm run typecheck && npm test && npm run build",
     "test:e2e": "npm run build && playwright test --config e2e/playwright.config.ts",
     "clean": "rm -rf dist"

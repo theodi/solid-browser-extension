@@ -1,145 +1,118 @@
+// AUTHORED-BY Claude Opus 4.8
+/**
+ * The MAIN-world injection: defines `window.solid` on every page. This script runs in the
+ * page's own JS world (so the page can call it), but it holds NO credential — every
+ * privileged operation is a `postMessage` to the ISOLATED content script, which relays to
+ * the service worker (the sole token holder). The page only ever sees the WebID + a
+ * proxied fetch Response. The credential boundary is enforced in the worker, not here.
+ */
+
 export {};
 
-import { Parser, Store, DataFactory } from 'n3';
-import { Agent, WebIdDataset } from '@solid/object';
+const CHANNEL = 'solid-browser-ext';
 
-const SOLID_EXT_PREFIX = 'solid-browser-ext';
-
+/**
+ * The `window.solid` API surface. Deliberately small + stable so the access-management
+ * track (a later `requestAccess(...)` method — see the SEAM below) slots in without a
+ * breaking change.
+ */
 interface SolidExtension {
+  /** The authenticated user's WebID, or null when signed out. */
   readonly webId: string | null;
-  readonly profile: Agent | null;
+  /** A DPoP-authenticated fetch, proxied through the extension (origin-gated, fail-closed). */
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  /** Declare this origin's Client Identifier Document URL so the pod sees the page's identity. */
   setClientId(clientId: string): void;
+  /** Start the interactive login for a WebID (same as the popup). */
   login(webId: string): Promise<void>;
+  /** Clear the session (app-local logout). */
   logout(): Promise<void>;
+
+  // --- ACCESS-MANAGEMENT SEAM (NOT IMPLEMENTED) -------------------------------------
+  // The access-request JS API (requestAccess / consent UI / queued-request handling) is
+  // a SEPARATE, design-first track and is intentionally out of scope for this core. The
+  // method is declared here so adding it later is non-breaking, but calling it throws so
+  // a consumer can feature-detect. Do NOT wire access management onto this stub without
+  // the access-management design.
+  requestAccess?(request: unknown): Promise<never>;
 }
 
-const pendingRequests = new Map<string, {
-  resolve: (value: Response) => void;
-  reject: (reason: Error) => void;
-}>();
-
-const pendingActions = new Map<string, {
-  resolve: (value: void) => void;
-  reject: (reason: Error) => void;
-}>();
+type Pending<T> = { resolve: (v: T) => void; reject: (e: Error) => void };
+const pendingFetches = new Map<string, Pending<Response>>();
+const pendingActions = new Map<string, Pending<void>>();
 
 let currentWebId: string | null = null;
-let currentProfile: Agent | null = null;
-
-function buildProfile(webId: string, turtle: string): Agent | null {
-  try {
-    const parser = new Parser({ baseIRI: webId.split('#')[0] });
-    const store = new Store();
-    store.addQuads(parser.parse(turtle));
-    const dataset = new WebIdDataset(store, DataFactory);
-    return dataset.mainSubject ?? null;
-  } catch {
-    return null;
-  }
-}
 
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
-  if (event.data?.source !== SOLID_EXT_PREFIX) return;
+  const data = event.data;
+  if (!data || data.channel !== CHANNEL || data.dir !== 'to-page') return;
 
-  const { type } = event.data;
-
-  if (type === 'SOLID_FETCH_RESPONSE') {
-    const pending = pendingRequests.get(event.data.requestId);
-    if (!pending) return;
-    pendingRequests.delete(event.data.requestId);
-
-    if (event.data.error) {
-      pending.reject(new Error(event.data.error));
-    } else {
-      pending.resolve(new Response(event.data.body, {
-        status: event.data.status,
-        statusText: event.data.statusText,
-        headers: new Headers(event.data.headers),
-      }));
+  switch (data.type) {
+    case 'SOLID_FETCH_RESPONSE': {
+      const pending = pendingFetches.get(data.requestId);
+      if (!pending) return;
+      pendingFetches.delete(data.requestId);
+      if (data.error) {
+        pending.reject(new Error(data.error));
+      } else {
+        pending.resolve(
+          new Response(data.body ?? null, {
+            status: data.status,
+            statusText: data.statusText,
+            headers: new Headers(data.headers ?? {}),
+          }),
+        );
+      }
+      break;
     }
-  }
-
-  if (type === 'SOLID_STATE_UPDATE') {
-    currentWebId = event.data.webId ?? null;
-    if (currentWebId && event.data.profileTurtle) {
-      currentProfile = buildProfile(currentWebId, event.data.profileTurtle);
-    } else {
-      currentProfile = null;
+    case 'SOLID_ACTION_RESPONSE': {
+      const pending = pendingActions.get(data.actionId);
+      if (!pending) return;
+      pendingActions.delete(data.actionId);
+      if (data.error) pending.reject(new Error(data.error));
+      else pending.resolve();
+      break;
     }
-  }
-
-  if (type === 'SOLID_ACTION_RESPONSE') {
-    const pending = pendingActions.get(event.data.actionId);
-    if (!pending) return;
-    pendingActions.delete(event.data.actionId);
-
-    if (event.data.error) {
-      pending.reject(new Error(event.data.error));
-    } else {
-      pending.resolve();
-    }
+    case 'SOLID_STATE_UPDATE':
+      currentWebId = data.webId ?? null;
+      break;
   }
 });
+
+function postToContent(message: Record<string, unknown>): void {
+  window.postMessage({ channel: CHANNEL, dir: 'to-content', ...message }, window.location.origin);
+}
 
 function solidFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   return new Promise((resolve, reject) => {
     const requestId = crypto.randomUUID();
-    pendingRequests.set(requestId, { resolve, reject });
-
-    window.postMessage({
-      source: SOLID_EXT_PREFIX,
+    pendingFetches.set(requestId, { resolve, reject });
+    let body: string | null = null;
+    if (init?.body != null) {
+      if (typeof init.body !== 'string') {
+        pendingFetches.delete(requestId);
+        reject(new Error('window.solid.fetch currently supports only string request bodies.'));
+        return;
+      }
+      body = init.body;
+    }
+    postToContent({
       type: 'SOLID_FETCH_REQUEST',
       requestId,
       url: input.toString(),
-      method: init?.method || 'GET',
-      headers: init?.headers
-        ? Object.fromEntries(new Headers(init.headers).entries())
-        : {},
-      body: init?.body ?? null,
-    }, '*');
+      method: init?.method ?? 'GET',
+      headers: init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : {},
+      body,
+    });
   });
 }
 
-let currentClientId: string | undefined;
-
-function setClientId(clientId: string): void {
-  currentClientId = clientId;
-  window.postMessage({
-    source: SOLID_EXT_PREFIX,
-    type: 'SOLID_SET_CLIENT_ID',
-    origin: window.location.origin,
-    clientId,
-  }, '*');
-}
-
-function login(webId: string): Promise<void> {
+function action(type: string, extra: Record<string, unknown> = {}): Promise<void> {
   return new Promise((resolve, reject) => {
     const actionId = crypto.randomUUID();
     pendingActions.set(actionId, { resolve, reject });
-
-    window.postMessage({
-      source: SOLID_EXT_PREFIX,
-      type: 'SOLID_LOGIN',
-      actionId,
-      webId,
-      origin: window.location.origin,
-      clientId: currentClientId,
-    }, '*');
-  });
-}
-
-function logout(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const actionId = crypto.randomUUID();
-    pendingActions.set(actionId, { resolve, reject });
-
-    window.postMessage({
-      source: SOLID_EXT_PREFIX,
-      type: 'SOLID_LOGOUT',
-      actionId,
-    }, '*');
+    postToContent({ type, actionId, ...extra });
   });
 }
 
@@ -147,23 +120,27 @@ const solid: SolidExtension = {
   get webId() {
     return currentWebId;
   },
-  get profile() {
-    return currentProfile;
-  },
   fetch: solidFetch,
-  setClientId,
-  login,
-  logout,
+  setClientId(clientId: string) {
+    postToContent({ type: 'SOLID_SET_CLIENT_ID', clientId });
+  },
+  login(webId: string) {
+    return action('SOLID_LOGIN', { webId });
+  },
+  logout() {
+    return action('SOLID_LOGOUT');
+  },
+  requestAccess() {
+    return Promise.reject(
+      new Error(
+        'window.solid.requestAccess is not implemented: access management is a separate, ' +
+          'design-first track and is not part of the core extension.',
+      ),
+    );
+  },
 };
 
-Object.defineProperty(window, 'solid', {
-  value: solid,
-  writable: false,
-  configurable: false,
-});
+Object.defineProperty(window, 'solid', { value: Object.freeze(solid), configurable: false });
 
-// Request current session state on load
-window.postMessage({
-  source: SOLID_EXT_PREFIX,
-  type: 'SOLID_GET_STATE',
-}, '*');
+// Ask the worker for the current session state on load (populates window.solid.webId).
+postToContent({ type: 'SOLID_GET_STATE' });

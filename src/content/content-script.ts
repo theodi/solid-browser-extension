@@ -1,90 +1,104 @@
+// AUTHORED-BY Claude Opus 4.8
+/**
+ * The ISOLATED-world bridge between the page (MAIN-world `window.solid`) and the service
+ * worker. It is the trust boundary: the page can only ASK; this script decides what to
+ * forward and stamps the page's REAL origin (read here, not page-supplied) onto
+ * origin-sensitive messages (login, set-client-id) so a page cannot impersonate another
+ * origin's client-id mapping.
+ */
+
 export {};
 
-const SOLID_EXT_PREFIX = 'solid-browser-ext';
+const CHANNEL = 'solid-browser-ext';
 
-// Page -> Background: relay messages from MAIN world to service worker
+interface PageMessage {
+  channel: string;
+  dir: string;
+  type: string;
+  requestId?: string;
+  actionId?: string;
+  url?: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string | null;
+  webId?: string;
+  clientId?: string;
+}
+
+function toPage(message: Record<string, unknown>): void {
+  window.postMessage({ channel: CHANNEL, dir: 'to-page', ...message }, window.location.origin);
+}
+
 window.addEventListener('message', (event) => {
+  // Only same-window, our-channel, page->content messages.
   if (event.source !== window) return;
-  if (event.data?.source !== SOLID_EXT_PREFIX) return;
+  const data = event.data as PageMessage | undefined;
+  if (!data || data.channel !== CHANNEL || data.dir !== 'to-content') return;
 
-  const { type } = event.data;
+  switch (data.type) {
+    case 'SOLID_FETCH_REQUEST':
+      chrome.runtime.sendMessage(
+        {
+          type: 'SOLID_FETCH_REQUEST',
+          requestId: data.requestId,
+          url: data.url,
+          method: data.method,
+          headers: data.headers ?? {},
+          body: data.body ?? null,
+        },
+        (response) => {
+          toPage({ type: 'SOLID_FETCH_RESPONSE', ...(response ?? { error: 'No response' }) });
+        },
+      );
+      break;
 
-  if (type === 'SOLID_FETCH_REQUEST') {
-    chrome.runtime.sendMessage({
-      type: 'SOLID_FETCH_REQUEST',
-      requestId: event.data.requestId,
-      url: event.data.url,
-      method: event.data.method,
-      headers: event.data.headers,
-      body: event.data.body,
-    }, (response) => {
-      window.postMessage({
-        source: SOLID_EXT_PREFIX,
-        type: 'SOLID_FETCH_RESPONSE',
-        ...response,
-      }, '*');
-    });
-  }
+    case 'SOLID_GET_STATE':
+      chrome.runtime.sendMessage({ type: 'SOLID_GET_STATE' }, (response) => {
+        toPage({ type: 'SOLID_STATE_UPDATE', webId: response?.webId ?? null });
+      });
+      break;
 
-  if (type === 'SOLID_GET_STATE') {
-    chrome.runtime.sendMessage({ type: 'SOLID_GET_STATE' }, (response) => {
-      window.postMessage({
-        source: SOLID_EXT_PREFIX,
-        type: 'SOLID_STATE_UPDATE',
-        webId: response?.webId ?? null,
-        profileTurtle: response?.profileTurtle ?? null,
-      }, '*');
-    });
-  }
+    case 'SOLID_SET_CLIENT_ID':
+      // Stamp the REAL page origin; the page cannot set it for another origin.
+      chrome.runtime.sendMessage({
+        type: 'SOLID_SET_CLIENT_ID',
+        origin: window.location.origin,
+        clientId: data.clientId,
+      });
+      break;
 
-  if (type === 'SOLID_SET_CLIENT_ID') {
-    chrome.runtime.sendMessage({
-      type: 'SOLID_SET_CLIENT_ID',
-      origin: event.data.origin,
-      clientId: event.data.clientId,
-    });
-  }
+    case 'SOLID_LOGIN':
+      chrome.runtime.sendMessage(
+        {
+          type: 'SOLID_LOGIN',
+          webId: data.webId,
+          origin: window.location.origin,
+        },
+        (response) => {
+          toPage({
+            type: 'SOLID_ACTION_RESPONSE',
+            actionId: data.actionId,
+            error: response?.error ?? null,
+          });
+        },
+      );
+      break;
 
-  if (type === 'SOLID_LOGIN') {
-    chrome.runtime.sendMessage({
-      type: 'SOLID_LOGIN',
-      actionId: event.data.actionId,
-      webId: event.data.webId,
-      origin: event.data.origin,
-      clientId: event.data.clientId,
-    }, (response) => {
-      window.postMessage({
-        source: SOLID_EXT_PREFIX,
-        type: 'SOLID_ACTION_RESPONSE',
-        actionId: event.data.actionId,
-        error: response?.error ?? null,
-      }, '*');
-    });
-  }
-
-  if (type === 'SOLID_LOGOUT') {
-    chrome.runtime.sendMessage({
-      type: 'SOLID_LOGOUT',
-      actionId: event.data.actionId,
-    }, (response) => {
-      window.postMessage({
-        source: SOLID_EXT_PREFIX,
-        type: 'SOLID_ACTION_RESPONSE',
-        actionId: event.data.actionId,
-        error: response?.error ?? null,
-      }, '*');
-    });
+    case 'SOLID_LOGOUT':
+      chrome.runtime.sendMessage({ type: 'SOLID_LOGOUT' }, (response) => {
+        toPage({
+          type: 'SOLID_ACTION_RESPONSE',
+          actionId: data.actionId,
+          error: response?.error ?? null,
+        });
+      });
+      break;
   }
 });
 
-// Background -> Page: listen for state broadcasts from service worker
+// Relay worker -> page state broadcasts.
 chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'SOLID_STATE_CHANGED') {
-    window.postMessage({
-      source: SOLID_EXT_PREFIX,
-      type: 'SOLID_STATE_UPDATE',
-      webId: message.webId,
-      profileTurtle: message.profileTurtle ?? null,
-    }, '*');
+  if (message?.type === 'SOLID_STATE_CHANGED') {
+    toPage({ type: 'SOLID_STATE_UPDATE', webId: message.webId ?? null });
   }
 });

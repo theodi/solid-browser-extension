@@ -1,6 +1,9 @@
-const path = require('path');
+const path = require('node:path');
 const CopyPlugin = require('copy-webpack-plugin');
 
+// MV3 bundle: one entry per context. ts-loader compiles with tsconfig.build.json (which
+// flips off the typecheck-only `noEmit`). The popup is loaded as an ES module
+// (<script type="module">); the others are classic content/worker scripts.
 module.exports = {
   mode: 'production',
   devtool: 'source-map',
@@ -9,7 +12,6 @@ module.exports = {
     'popup/popup': './src/popup/popup.ts',
     'content/content-script': './src/content/content-script.ts',
     'inject/inject': './src/inject/inject.ts',
-    'redirect/redirect': './src/redirect/redirect.ts',
   },
   output: {
     path: path.resolve(__dirname, 'dist'),
@@ -23,7 +25,10 @@ module.exports = {
     rules: [
       {
         test: /\.ts$/,
-        use: 'ts-loader',
+        use: {
+          loader: 'ts-loader',
+          options: { configFile: 'tsconfig.build.json' },
+        },
         exclude: /node_modules/,
       },
     ],
@@ -34,7 +39,6 @@ module.exports = {
         { from: 'src/manifest.json', to: 'manifest.json' },
         { from: 'src/popup/popup.html', to: 'popup/popup.html' },
         { from: 'src/popup/popup.css', to: 'popup/popup.css' },
-        { from: 'src/redirect/redirect.html', to: 'redirect/redirect.html' },
         { from: 'src/icons', to: 'icons' },
       ],
     }),

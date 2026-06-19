@@ -32,6 +32,7 @@ import { initiateLogin, refreshSession } from './auth-flow';
 import { authenticatedFetch, type FetchSession } from './core/authenticated-fetch';
 import { importDpopKeyPair } from './core/dpop';
 import { computeAllowedOrigins, isValidClientIdUrl } from './core/origin-policy';
+import { filterResponseHeaders } from './core/response-headers';
 import { SingleFlight } from './core/single-flight';
 import { parseWebIdProfile } from './core/webid';
 import {
@@ -149,10 +150,9 @@ async function handleFetch(message: FetchRequest): Promise<FetchResponse> {
     });
     if (origin && result.nonce) nonceByOrigin.set(origin, result.nonce);
 
-    const headers: Record<string, string> = {};
-    result.response.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
+    // Defense-in-depth: relay only the allowlisted, app-relevant response headers back to
+    // the page rather than every header the server emitted (see response-headers.ts).
+    const headers = filterResponseHeaders(result.response.headers);
     return {
       requestId: message.requestId,
       status: result.response.status,

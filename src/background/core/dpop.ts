@@ -135,10 +135,10 @@ export async function createDpopProof(params: DpopProofParams): Promise<string> 
     jti: crypto.randomUUID(),
   };
   if (accessToken !== undefined) {
-    payload['ath'] = await accessTokenHash(accessToken);
+    payload.ath = await accessTokenHash(accessToken);
   }
   if (nonce !== undefined) {
-    payload['nonce'] = nonce;
+    payload.nonce = nonce;
   }
 
   return new jose.SignJWT(payload)

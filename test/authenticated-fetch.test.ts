@@ -1,7 +1,7 @@
 // AUTHORED-BY Claude Opus 4.8
 
 import * as jose from 'jose';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, type Mock, vi } from 'vitest';
 import { authenticatedFetch, type FetchSession } from '../src/background/core/authenticated-fetch';
 import { generateDpopKeyPair } from '../src/background/core/dpop';
 
@@ -19,10 +19,16 @@ function ok(headers: Record<string, string> = {}): Response {
   return new Response('body', { status: 200, headers });
 }
 
+/** A fetch mock typed so `.mock.calls[i][1]` is the RequestInit (the credential carrier). */
+type FetchMock = Mock<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>;
+function mockFetch(impl: (url: string, init?: RequestInit) => Promise<Response>): FetchMock {
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => impl(input.toString(), init));
+}
+
 describe('authenticatedFetch — credential boundary', () => {
   it('attaches a DPoP-bound token for an allowed origin', async () => {
     const session = await makeSession();
-    const fetchImpl = vi.fn(async () => ok());
+    const fetchImpl = mockFetch(async () => ok());
     const { authenticated } = await authenticatedFetch(session, {
       url: 'https://alice.pod.example/private/notes.ttl',
       method: 'GET',
@@ -44,7 +50,7 @@ describe('authenticatedFetch — credential boundary', () => {
 
   it('does NOT attach the token to a foreign origin (token-leak attack)', async () => {
     const session = await makeSession();
-    const fetchImpl = vi.fn(async () => ok());
+    const fetchImpl = mockFetch(async () => ok());
     const { authenticated } = await authenticatedFetch(session, {
       url: 'https://evil.example/collect',
       method: 'POST',
@@ -65,7 +71,7 @@ describe('authenticatedFetch — credential boundary', () => {
       allowedOrigins: new Set(['https://idp.example']),
       tokenEndpoint: 'https://idp.example/token',
     });
-    const fetchImpl = vi.fn(async () => ok());
+    const fetchImpl = mockFetch(async () => ok());
     const { authenticated } = await authenticatedFetch(session, {
       url: 'https://idp.example/token',
       method: 'POST',
@@ -77,7 +83,7 @@ describe('authenticatedFetch — credential boundary', () => {
 
   it('strips a page-supplied Authorization / DPoP header (no header injection)', async () => {
     const session = await makeSession();
-    const fetchImpl = vi.fn(async () => ok());
+    const fetchImpl = mockFetch(async () => ok());
     await authenticatedFetch(session, {
       url: 'https://alice.pod.example/x',
       method: 'GET',
@@ -92,7 +98,7 @@ describe('authenticatedFetch — credential boundary', () => {
   it('retries ONCE on an RFC 9449 §8 nonce challenge with the server nonce', async () => {
     const session = await makeSession();
     let call = 0;
-    const fetchImpl = vi.fn(async () => {
+    const fetchImpl = mockFetch(async () => {
       call += 1;
       if (call === 1) {
         return new Response('nonce required', {
@@ -127,7 +133,7 @@ describe('authenticatedFetch — credential boundary', () => {
 
   it('does NOT retry on a non-nonce 401 (e.g. invalid_token)', async () => {
     const session = await makeSession();
-    const fetchImpl = vi.fn(
+    const fetchImpl = mockFetch(
       async () =>
         new Response('nope', {
           status: 401,

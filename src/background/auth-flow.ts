@@ -1,12 +1,47 @@
+// AUTHORED-BY Claude Opus 4.8
+/**
+ * The Solid-OIDC authorization-code + PKCE + DPoP login, adapted for the MV3 service
+ * worker (no `window`): the interactive redirect is driven by
+ * `chrome.identity.launchWebAuthFlow`, which opens the IdP in a managed window and
+ * resolves with the `https://<extension-id>.chromiumapp.org/...` callback URL. The DPoP
+ * proofs (token exchange + refresh) go through the shared core/dpop module so the proof
+ * discipline matches the rest of the suite (RFC 9449).
+ *
+ * Login uses a PUBLISHED Solid-OIDC Client Identifier Document URL as the `client_id`
+ * (so the consent screen shows a stable name and `token_endpoint_auth_method=none`
+ * public-client behaviour is correct), falling back to dynamic client registration only
+ * when no Client ID Document is configured (dev). A page may supply its OWN Client ID
+ * Document via `window.solid.setClientId(...)` to identify itself to the pod.
+ */
+
 import * as jose from 'jose';
 import {
-  saveAuthParams,
-  loadAuthParams,
-  clearAuthParams,
+  createDpopProof,
   exportDpopKeyPair,
-  saveSession,
+  generateDpopKeyPair,
+  importDpopKeyPair,
+} from './core/dpop';
+import { isLoopbackHost } from './core/origin-policy';
+import { parseWebIdProfile, selectIssuer } from './core/webid';
+import {
+  type AuthParams,
+  clearAuthParams,
+  loadAuthParams,
   type StoredSession,
-} from './session-database';
+  saveAuthParams,
+  saveSession,
+} from './session-store';
+
+/**
+ * The extension's own published Client Identifier Document URL. A real deployment serves
+ * a JSON-LD Client ID Document (with this extension's `chromiumapp.org` redirect URI) at a
+ * stable HTTPS URL and pins it here; until then the value is overridable at runtime via
+ * `chrome.storage` (the e2e harness injects a localhost Client ID Document). When unset,
+ * the flow falls back to dynamic client registration.
+ */
+const DEFAULT_CLIENT_ID = '';
+
+const SCOPE = 'openid webid offline_access';
 
 interface OidcConfig {
   authorization_endpoint: string;
@@ -15,58 +50,46 @@ interface OidcConfig {
   issuer: string;
 }
 
-async function fetchOidcConfig(idpUrl: string): Promise<OidcConfig> {
-  const wellKnown = idpUrl.replace(/\/$/, '') + '/.well-known/openid-configuration';
-  const response = await fetch(wellKnown);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch OIDC configuration from ${wellKnown}: ${response.status}`);
-  }
-  return response.json();
+/** The `https:` everywhere / `http:` loopback-only transport guard (RFC 8252 §8.3). */
+function assertIssuerTransport(issuer: string): void {
+  const url = new URL(issuer);
+  if (url.protocol === 'https:') return;
+  if (url.protocol === 'http:' && isLoopbackHost(url.hostname)) return;
+  throw new Error(`Refusing to use insecure issuer transport: ${issuer}`);
 }
 
-// The extension's dereferenceable Client ID Document URL.
-// This URL must resolve to a JSON-LD document with the extension's redirect_uri.
-// In production, this would be hosted by the extension developer.
-const EXTENSION_CLIENT_ID = 'http://localhost:8080/client-id';
+async function fetchOidcConfig(issuer: string): Promise<OidcConfig> {
+  assertIssuerTransport(issuer);
+  const wellKnown = `${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`;
+  const response = await fetch(wellKnown);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch OIDC configuration (${response.status}) from ${wellKnown}`);
+  }
+  const config = (await response.json()) as OidcConfig;
+  // OIDC Discovery §4.3: the returned issuer must equal the requested one.
+  if (config.issuer.replace(/\/$/, '') !== issuer.replace(/\/$/, '')) {
+    throw new Error(`Issuer mismatch: requested ${issuer}, discovery returned ${config.issuer}`);
+  }
+  return config;
+}
 
+/** The fixed redirect URI this extension is registered with (chrome.identity). */
 function getRedirectUri(): string {
   return chrome.identity.getRedirectURL('callback');
 }
 
-async function resolveIssuerFromWebId(webId: string): Promise<string> {
-  // Fetch the WebID profile document as Turtle
-  const response = await fetch(webId, {
-    headers: { Accept: 'text/turtle' },
-  });
+async function fetchProfile(webId: string): Promise<string> {
+  const response = await fetch(webId, { headers: { Accept: 'text/turtle' } });
   if (!response.ok) {
-    throw new Error(`Failed to fetch WebID profile from ${webId}: ${response.status}`);
+    throw new Error(`Failed to fetch WebID profile (${response.status}) from ${webId}`);
   }
-  const turtle = await response.text();
-
-  // Parse solid:oidcIssuer from the Turtle document
-  // Matches both full URI and prefixed forms
-  const issuerPatterns = [
-    /solid:oidcIssuer\s+<([^>]+)>/,
-    /http:\/\/www\.w3\.org\/ns\/solid\/terms#oidcIssuer>\s+<([^>]+)>/,
-  ];
-
-  for (const pattern of issuerPatterns) {
-    const match = turtle.match(pattern);
-    if (match) {
-      return match[1];
-    }
-  }
-
-  throw new Error(
-    `No solid:oidcIssuer found in WebID profile at ${webId}. ` +
-    'Make sure your WebID profile contains a solid:oidcIssuer triple.'
-  );
+  return response.text();
 }
 
 async function dynamicClientRegistration(
   registrationEndpoint: string,
-  redirectUri: string
-): Promise<{ client_id: string; client_secret?: string }> {
+  redirectUri: string,
+): Promise<string> {
   const response = await fetch(registrationEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -74,262 +97,220 @@ async function dynamicClientRegistration(
       application_type: 'web',
       redirect_uris: [redirectUri],
       token_endpoint_auth_method: 'none',
-      id_token_signed_response_alg: 'ES256',
       grant_types: ['authorization_code', 'refresh_token'],
-      scope: 'openid webid offline_access',
+      response_types: ['code'],
+      scope: SCOPE,
       client_name: 'Solid Browser Extension',
     }),
   });
   if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`Dynamic client registration failed: ${response.status} ${errorBody}`);
+    throw new Error(`Dynamic client registration failed (${response.status})`);
   }
-  return response.json();
+  const body = (await response.json()) as { client_id: string };
+  return body.client_id;
 }
 
-function generateCodeVerifier(): string {
-  const array = new Uint8Array(32);
+function randomB64Url(bytes: number): string {
+  const array = new Uint8Array(bytes);
   crypto.getRandomValues(array);
   return jose.base64url.encode(array);
 }
 
-async function generateCodeChallenge(verifier: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(verifier);
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return jose.base64url.encode(new Uint8Array(hash));
+async function pkceChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return jose.base64url.encode(new Uint8Array(digest));
 }
 
-function generateState(): string {
-  const array = new Uint8Array(16);
-  crypto.getRandomValues(array);
-  return jose.base64url.encode(array);
+export interface InitiateLoginOptions {
+  readonly webId: string;
+  /** A Client Identifier Document URL to log in as (page-supplied or the extension's own). */
+  readonly clientId?: string;
+  /** Resolve a multi-issuer ambiguity (the user picks). Defaults to the first issuer. */
+  readonly chooseIssuer?: (issuers: string[]) => Promise<string>;
 }
 
-export async function initiateLogin(webId: string, staticClientId?: string): Promise<StoredSession> {
-  const idpUrl = await resolveIssuerFromWebId(webId);
-  const oidcConfig = await fetchOidcConfig(idpUrl);
+/**
+ * Run the interactive authorization-code (DPoP) login for a WebID and persist the
+ * resulting session. Returns the WebID + display profile parsed from the same fetch.
+ */
+export async function initiateLogin(
+  options: InitiateLoginOptions,
+): Promise<{ session: StoredSession; name: string | null; photoUrl: string | null }> {
+  const { webId } = options;
+  const turtle = await fetchProfile(webId);
+  const profile = parseWebIdProfile(webId, turtle);
+  const issuer = await selectIssuer(
+    profile,
+    webId,
+    options.chooseIssuer ?? (async (issuers) => issuers[0]),
+  );
+
+  const config = await fetchOidcConfig(issuer);
   const redirectUri = getRedirectUri();
 
-  // Use the provided client ID, or the extension's own dereferenceable client identifier
-  const clientId = staticClientId || EXTENSION_CLIENT_ID;
+  let clientId = options.clientId || DEFAULT_CLIENT_ID;
+  if (!clientId) {
+    if (!config.registration_endpoint) {
+      throw new Error(
+        'No client identifier configured and the issuer offers no dynamic registration endpoint.',
+      );
+    }
+    clientId = await dynamicClientRegistration(config.registration_endpoint, redirectUri);
+  }
 
-  // Generate PKCE
-  const codeVerifier = generateCodeVerifier();
-  const codeChallenge = await generateCodeChallenge(codeVerifier);
-  const state = generateState();
+  const codeVerifier = randomB64Url(32);
+  const codeChallenge = await pkceChallenge(codeVerifier);
+  const state = randomB64Url(16);
 
-  // Store auth params for token exchange
-  await saveAuthParams({
+  const params: AuthParams = {
     codeVerifier,
     state,
     clientId,
-    tokenEndpoint: oidcConfig.token_endpoint,
-    issuer: oidcConfig.issuer,
+    issuer: config.issuer,
+    tokenEndpoint: config.token_endpoint,
     redirectUri,
-  });
+  };
+  await saveAuthParams(params);
 
-  // Build authorization URL
-  const params = new URLSearchParams({
+  const authUrl = new URL(config.authorization_endpoint);
+  authUrl.search = new URLSearchParams({
     response_type: 'code',
     client_id: clientId,
     redirect_uri: redirectUri,
-    scope: 'openid webid offline_access',
+    scope: SCOPE,
     state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
     prompt: 'consent',
-  });
+  }).toString();
 
-  const authUrl = `${oidcConfig.authorization_endpoint}?${params.toString()}`;
-
-  // Launch the auth flow using chrome.identity
   const callbackUrl = await new Promise<string>((resolve, reject) => {
-    chrome.identity.launchWebAuthFlow(
-      { url: authUrl, interactive: true },
-      (responseUrl) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        } else if (!responseUrl) {
-          reject(new Error('No response URL from auth flow'));
-        } else {
-          resolve(responseUrl);
-        }
-      }
-    );
+    chrome.identity.launchWebAuthFlow({ url: authUrl.toString(), interactive: true }, (url) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else if (!url) reject(new Error('Authorization was cancelled.'));
+      else resolve(url);
+    });
   });
 
-  // Extract code, state, iss from callback URL
-  const callbackParams = new URL(callbackUrl).searchParams;
-  const code = callbackParams.get('code');
-  const returnedState = callbackParams.get('state');
-  const iss = callbackParams.get('iss');
-
-  if (!code || !returnedState) {
-    const error = callbackParams.get('error');
-    const errorDesc = callbackParams.get('error_description');
-    throw new Error(`Auth failed: ${error} - ${errorDesc}`);
-  }
-
-  // Handle the redirect (exchange code for tokens)
-  return handleRedirect(code, returnedState, iss || oidcConfig.issuer);
+  const session = await completeLogin(callbackUrl);
+  return { session, name: profile.name, photoUrl: profile.photoUrl };
 }
 
-async function createDpopProof(
-  keyPair: CryptoKeyPair,
-  method: string,
-  url: string,
-  nonce?: string
-): Promise<string> {
-  const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
-  const header: Record<string, unknown> = {
-    alg: 'ES256',
-    typ: 'dpop+jwt',
-    jwk: {
-      kty: publicJwk.kty,
-      crv: publicJwk.crv,
-      x: publicJwk.x,
-      y: publicJwk.y,
-    },
-  };
+/** Exchange the authorization code (from the callback URL) for a DPoP-bound token set. */
+async function completeLogin(callbackUrl: string): Promise<StoredSession> {
+  const callback = new URL(callbackUrl).searchParams;
+  const code = callback.get('code');
+  const returnedState = callback.get('state');
 
-  const payload: Record<string, unknown> = {
-    jti: crypto.randomUUID(),
-    htm: method,
-    htu: url,
-    iat: Math.floor(Date.now() / 1000),
-  };
-  if (nonce) {
-    payload.nonce = nonce;
+  const params = await loadAuthParams();
+  if (!params) throw new Error('Login flow not initiated (no auth params).');
+
+  if (!code) {
+    const error = callback.get('error') ?? 'unknown';
+    throw new Error(`Authorization failed: ${error} - ${callback.get('error_description') ?? ''}`);
+  }
+  if (returnedState !== params.state) {
+    throw new Error('State mismatch — possible CSRF; aborting login.');
   }
 
-  const privateKey = await crypto.subtle.importKey(
-    'jwk',
-    await crypto.subtle.exportKey('jwk', keyPair.privateKey),
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['sign']
-  );
+  const keyPair = await generateDpopKeyPair();
+  const dpopProof = await createDpopProof({
+    keyPair,
+    htm: 'POST',
+    htu: params.tokenEndpoint,
+  });
 
-  return new jose.SignJWT(payload as jose.JWTPayload)
-    .setProtectedHeader(header as jose.JWTHeaderParameters)
-    .sign(privateKey);
-}
-
-export async function handleRedirect(
-  code: string,
-  state: string,
-  iss: string
-): Promise<StoredSession> {
-  const authParams = await loadAuthParams();
-  if (!authParams) {
-    throw new Error('No auth params found — login flow not initiated');
-  }
-
-  // Validate state
-  if (state !== authParams.state) {
-    throw new Error('State mismatch — possible CSRF attack');
-  }
-
-  // Validate issuer
-  if (iss !== authParams.issuer) {
-    throw new Error('Issuer mismatch');
-  }
-
-  // Generate DPoP key pair (extractable for persistence)
-  const keyPair = await crypto.subtle.generateKey(
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    true,
-    ['sign', 'verify']
-  );
-
-  const tokenEndpoint = authParams.tokenEndpoint as string;
-  const dpopProof = await createDpopProof(keyPair, 'POST', tokenEndpoint);
-
-  // Exchange code for tokens
-  const tokenResponse = await fetch(tokenEndpoint, {
+  const response = await fetch(params.tokenEndpoint, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      DPoP: dpopProof,
-    },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', DPoP: dpopProof },
     body: new URLSearchParams({
       grant_type: 'authorization_code',
       code,
-      redirect_uri: authParams.redirectUri as string,
-      client_id: authParams.clientId as string,
-      code_verifier: authParams.codeVerifier as string,
+      redirect_uri: params.redirectUri,
+      client_id: params.clientId,
+      code_verifier: params.codeVerifier,
     }),
   });
 
-  if (!tokenResponse.ok) {
-    const errorBody = await tokenResponse.text();
-    throw new Error(`Token exchange failed: ${tokenResponse.status} ${errorBody}`);
+  if (!response.ok) {
+    throw new Error(`Token exchange failed (${response.status}).`);
   }
+  const tokens = (await response.json()) as {
+    access_token: string;
+    refresh_token?: string;
+    id_token: string;
+    expires_in?: number;
+  };
 
-  const tokens = await tokenResponse.json();
-
-  // Decode the ID token to extract WebID
-  const idTokenPayload = jose.decodeJwt(tokens.id_token);
-  const webId = (idTokenPayload.webid as string) || (idTokenPayload.sub as string);
-  if (!webId) {
-    throw new Error('No WebID found in ID token');
-  }
-
-  const storedKeyPair = await exportDpopKeyPair(keyPair);
+  const idToken = jose.decodeJwt(tokens.id_token);
+  const webId = (idToken.webid as string) || (idToken.sub as string);
+  if (!webId) throw new Error('No WebID in the ID token.');
 
   const session: StoredSession = {
     webId,
     accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    idToken: tokens.id_token,
-    dpopKeyPair: storedKeyPair,
-    tokenEndpoint,
-    issuer: authParams.issuer as string,
-    clientId: authParams.clientId as string,
+    refreshToken: tokens.refresh_token ?? null,
+    dpopKeyPair: await exportDpopKeyPair(keyPair),
+    issuer: params.issuer,
+    tokenEndpoint: params.tokenEndpoint,
+    clientId: params.clientId,
     expiresAt: Date.now() + (tokens.expires_in ?? 600) * 1000,
   };
 
   await saveSession(session);
   await clearAuthParams();
-
   return session;
 }
 
-export async function refreshAccessToken(
-  session: StoredSession,
-  keyPair: CryptoKeyPair
-): Promise<StoredSession> {
-  const dpopProof = await createDpopProof(keyPair, 'POST', session.tokenEndpoint);
+/**
+ * Refresh an expiring session via the DPoP-bound refresh-token grant, reusing the SAME
+ * keypair (CSS binds the refresh token to the original `jkt`, so a regenerated key fails).
+ * One retry on a server DPoP-nonce challenge.
+ */
+export async function refreshSession(session: StoredSession): Promise<StoredSession> {
+  if (!session.refreshToken) throw new Error('No refresh token; re-login required.');
+  const keyPair = await importDpopKeyPair(session.dpopKeyPair);
 
-  const response = await fetch(session.tokenEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      DPoP: dpopProof,
-    },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: session.refreshToken,
-      client_id: session.clientId,
-    }),
-  });
+  const grant = async (nonce?: string): Promise<Response> => {
+    const proof = await createDpopProof({
+      keyPair,
+      htm: 'POST',
+      htu: session.tokenEndpoint,
+      nonce,
+    });
+    return fetch(session.tokenEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', DPoP: proof },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: session.refreshToken as string,
+        client_id: session.clientId,
+        scope: SCOPE,
+      }),
+    });
+  };
 
+  let response = await grant();
+  if (response.status === 400 || response.status === 401) {
+    const nonce = response.headers.get('dpop-nonce');
+    if (nonce) response = await grant(nonce);
+  }
   if (!response.ok) {
-    throw new Error(`Token refresh failed: ${response.status}`);
+    throw new Error(`Token refresh failed (${response.status}).`);
   }
 
-  const tokens = await response.json();
+  const tokens = (await response.json()) as {
+    access_token: string;
+    refresh_token?: string;
+    expires_in?: number;
+  };
 
-  const updatedSession: StoredSession = {
+  const updated: StoredSession = {
     ...session,
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token ?? session.refreshToken,
     expiresAt: Date.now() + (tokens.expires_in ?? 600) * 1000,
   };
-
-  await saveSession(updatedSession);
-  return updatedSession;
+  await saveSession(updated);
+  return updated;
 }
-
-export { createDpopProof };

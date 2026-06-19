@@ -49,15 +49,46 @@ function objectsFor(store: Store, subject: string, predicate: string): string[] 
   return out;
 }
 
+/** Whether `value` is a parseable http(s) absolute URL (a usable issuer). */
+function isHttpUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'https:' || protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The `solid:oidcIssuer` objects on the WebID subject, restricted to **NamedNode** terms
+ * whose value is an absolute URL. A literal or blank-node issuer object — or a relative /
+ * non-URL value — is not a usable issuer and is dropped, so malformed profiles can't feed
+ * an invalid issuer string into the login flow.
+ */
+function issuersFor(store: Store, subject: string): string[] {
+  const out: string[] = [];
+  for (const quad of store.getQuads(
+    DataFactory.namedNode(subject),
+    DataFactory.namedNode(SOLID_OIDC_ISSUER),
+    null,
+    null,
+  )) {
+    if (quad.object.termType === 'NamedNode' && isHttpUrl(quad.object.value)) {
+      out.push(quad.object.value);
+    }
+  }
+  return out;
+}
+
 /**
  * Extract the issuer list + display profile for `webId` from its Turtle profile. PURE
- * (no fetch). The issuer list is the deduped `solid:oidcIssuer` objects on the WebID
- * subject; name/photo fall back foaf → vcard.
+ * (no fetch). The issuer list is the deduped, NamedNode-only, absolute-URL
+ * `solid:oidcIssuer` objects on the WebID subject; name/photo fall back foaf → vcard.
  */
 export function parseWebIdProfile(webId: string, turtle: string): WebIdProfile {
   const store = parse(webId, turtle);
 
-  const issuers = [...new Set(objectsFor(store, webId, SOLID_OIDC_ISSUER))];
+  const issuers = [...new Set(issuersFor(store, webId))];
 
   const name =
     objectsFor(store, webId, FOAF_NAME)[0] ?? objectsFor(store, webId, VCARD_FN)[0] ?? null;
@@ -89,5 +120,11 @@ export async function selectIssuer(
 ): Promise<string> {
   if (profile.issuers.length === 0) throw new NoIssuerError(webId);
   if (profile.issuers.length === 1) return profile.issuers[0];
-  return choose(profile.issuers);
+  const chosen = await choose(profile.issuers);
+  // The chooser MUST return one of the profile's advertised issuers — never log in against
+  // an issuer the WebID doesn't actually advertise.
+  if (!profile.issuers.includes(chosen)) {
+    throw new Error(`Chosen issuer ${chosen} is not advertised by the WebID profile at ${webId}.`);
+  }
+  return chosen;
 }

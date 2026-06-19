@@ -53,6 +53,20 @@ describe('parseWebIdProfile', () => {
     expect(p.name).toBeNull();
     expect(p.photoUrl).toBeNull();
   });
+
+  it('IGNORES a literal-valued solid:oidcIssuer (issuers must be NamedNode IRIs)', () => {
+    const turtle = `
+      @prefix solid: <http://www.w3.org/ns/solid/terms#>.
+      <#me> solid:oidcIssuer "https://not-a-real-iri/" ; solid:oidcIssuer <https://real.example/> .`;
+    expect(parseWebIdProfile(WEBID, turtle).issuers).toEqual(['https://real.example/']);
+  });
+
+  it('IGNORES a non-http(s) issuer IRI', () => {
+    const turtle = `
+      @prefix solid: <http://www.w3.org/ns/solid/terms#>.
+      <#me> solid:oidcIssuer <urn:bad:issuer> ; solid:oidcIssuer <https://ok.example/> .`;
+    expect(parseWebIdProfile(WEBID, turtle).issuers).toEqual(['https://ok.example/']);
+  });
 });
 
 describe('selectIssuer', () => {
@@ -83,5 +97,16 @@ describe('selectIssuer', () => {
     await expect(
       selectIssuer({ issuers: [], name: null, photoUrl: null }, WEBID, choose),
     ).rejects.toBeInstanceOf(NoIssuerError);
+  });
+
+  it('REJECTS a chooser result that is not an advertised issuer', async () => {
+    const rogue = async () => 'https://attacker.example/';
+    await expect(
+      selectIssuer(
+        { issuers: ['https://a/', 'https://b/'], name: null, photoUrl: null },
+        WEBID,
+        rogue,
+      ),
+    ).rejects.toThrow(/not advertised/);
   });
 });

@@ -48,6 +48,19 @@ describe('authenticatedFetch — credential boundary', () => {
     expect(proof.ath).toBeTypeOf('string');
   });
 
+  it('the DPoP htu drops the query + fragment for a queried resource URL (RFC 9449 §4.2)', async () => {
+    const session = await makeSession();
+    const fetchImpl = mockFetch(async () => ok());
+    await authenticatedFetch(session, {
+      url: 'https://alice.pod.example/q.ttl?a=1&b=2#frag',
+      method: 'GET',
+      headers: {},
+      fetchImpl,
+    });
+    const headers = (fetchImpl.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(jose.decodeJwt(headers.DPoP).htu).toBe('https://alice.pod.example/q.ttl');
+  });
+
   it('does NOT attach the token to a foreign origin (token-leak attack)', async () => {
     const session = await makeSession();
     const fetchImpl = mockFetch(async () => ok());

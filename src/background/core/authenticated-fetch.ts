@@ -37,7 +37,14 @@ export interface AuthenticatedFetchOptions {
   readonly url: string;
   readonly method: string;
   readonly headers: Record<string, string>;
-  readonly body?: BodyInit | null;
+  /**
+   * The request body. Restricted to a REPLAYABLE `string | null` because the §8 nonce
+   * retry must re-send the body: a one-shot `ReadableStream`/`Blob` stream cannot be sent
+   * twice. The page->worker message protocol already serialises bodies to strings, so this
+   * is the only shape that ever reaches here; a non-string body is rejected at the inject
+   * boundary (see inject.ts).
+   */
+  readonly body?: string | null;
   /** A cached server DPoP nonce to use on the first attempt, if known. */
   readonly nonce?: string;
   /** Injected fetch (test seam). Defaults to the global. */

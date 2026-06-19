@@ -11,15 +11,44 @@ Page (MAIN world)  <--postMessage-->  Content Script (ISOLATED)  <--chrome.runti
     inject.ts                          content-script.ts                               service-worker.ts
 ```
 
-- **inject.ts**: MAIN world script defining `window.solid`
-- **content-script.ts**: ISOLATED world bridge relaying messages
-- **service-worker.ts**: Background session manager, auth fetch proxy, client ID registry
-- **auth-flow.ts**: Manual OIDC flow adapted for service worker (no `window`)
-- **session-database.ts**: Token/key persistence via `chrome.storage.local`
+- **inject.ts**: MAIN world script defining `window.solid` (no credential; postMessage only)
+- **content-script.ts**: ISOLATED world bridge — the trust boundary; stamps the real page origin
+- **service-worker.ts**: Background session manager + message router + the SOLE token holder
+- **core/**: the security-critical, unit-testable core —
+  - `dpop.ts` (RFC 9449 DPoP proofs on Web Crypto + jose),
+  - `origin-policy.ts` (the fail-closed per-origin credential boundary),
+  - `authenticated-fetch.ts` (origin-gated resource fetch + §8 nonce retry),
+  - `www-authenticate.ts` (the use_dpop_nonce classifier),
+  - `webid.ts` (RDF issuer/profile resolution via N3.js)
+- **auth-flow.ts**: Solid-OIDC auth-code + PKCE + DPoP via `chrome.identity.launchWebAuthFlow`
+- **action-icon.ts**: the toolbar avatar (OffscreenCanvas render of photo/initials)
+- **session-store.ts**: token/key/profile/recent-accounts persistence via `chrome.storage.local`
+- **shared/messages.ts**: the JSON-serialisable 4-context message protocol
 
-## Auth Library
+## Auth + suite packages
 
-Uses `@uvdsl/solid-oidc-client-browser/core`. The `login()` method is bypassed (uses `window.location.href`) — we manually construct the auth URL and use `chrome.tabs.create()`. `authFetch()` and `restore()` are used directly.
+Solid-OIDC **authorization-code + PKCE + DPoP** via `chrome.identity.launchWebAuthFlow` (no
+`window` in a service worker). DPoP proofs mirror `@jeswr/solid-dpop`'s RFC 9449 discipline but
+are reimplemented on Web Crypto + jose because the service worker has no `node:crypto`. Reused
+suite packages (pinned `git+https#<sha>`): `@jeswr/solid-elements` (the popup web components),
+`@jeswr/solid-session-restore` (the audited silent-restore decision), `@jeswr/solid-dpop` (the
+proof-spec reference). **Never re-alias the components' own theme tokens; scope filled button
+styles to `#login-form`** (the suite CSS-leak guards).
+
+## Security invariants (do not weaken)
+
+- The page NEVER receives a token; only the WebID + proxied fetch results.
+- `core/origin-policy.ts` fails CLOSED: the token attaches only to the WebID/issuer/pod
+  origins, never a foreign origin, never `/token`, never over cleartext (loopback dev excepted).
+- Page-supplied `Authorization`/`DPoP` headers are stripped; the content script stamps the REAL
+  page origin so a page can't impersonate another origin's client-id mapping.
+- **Access management is OUT OF SCOPE** — `window.solid.requestAccess?` is a declared,
+  throwing SEAM only. Do not implement it without the access-management design track.
+
+## Gate
+
+`npm run gate` = lint (biome) + typecheck (tsc) + test (vitest, the core) + build (webpack).
+e2e (`npm run test:e2e`) runs against a LOCAL Community Solid Server only, never the live box.
 
 ## Build & Test
 
@@ -49,7 +78,8 @@ Solid-specific skill documents are in `.skills/`:
 ## Documentation Lookups
 
 Use the Context7 MCP server for up-to-date library documentation. Prefer Context7 over training data for API specifics of:
-- `@uvdsl/solid-oidc-client-browser`
+- `jose` (DPoP proof signing / JWK)
+- `@jeswr/solid-elements`, `@jeswr/solid-session-restore`, `@jeswr/solid-dpop`
 - Playwright extension testing
 - Community Solid Server configuration
 - Chrome Extension MV3 APIs
@@ -104,11 +134,15 @@ Rules:
 
 ## Key Conventions
 
-- TypeScript throughout, strict mode
-- Webpack bundler with 5 entry points
-- Manifest V3 with `world: "MAIN"` for injection
-- DPoP keys stored as extractable JWK (service worker suspension)
-- Per-origin client ID support via `solid.setClientId()`
-- Extension uses a dereferenceable client identifier (not dynamic registration)
-- Solid branding for popup: primary color #7C4DFF
-- Profile data parsed with N3.js + `@solid/object` Agent class
+- TypeScript throughout, strict mode; biome lint + format
+- Webpack bundler, 4 entry points (service-worker, popup, content-script, inject)
+- Manifest V3 with `world: "MAIN"` for the `window.solid` injection
+- DPoP keys stored as extractable JWK (the MV3 worker is killed and would lose a
+  non-extractable key, breaking the jkt-bound refresh) — kept in page-unreachable
+  `chrome.storage.local`
+- Per-origin client ID via `solid.setClientId()`; a published Client Identifier Document
+  client_id with dynamic-registration dev fallback
+- Popup themed via the app-shell OKLCH tokens (light/dark), consistent with Pod Manager
+- WebID issuer + profile parsed with N3.js (proper RDF, never regex over Turtle)
+- New source files carry an `AUTHORED-BY Claude Opus 4.8` marker; commits carry the Opus
+  provenance trailers

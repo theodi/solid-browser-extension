@@ -116,16 +116,21 @@ function action(type: string, extra: Record<string, unknown> = {}): Promise<void
   });
 }
 
+// The client-id declared via setClientId(), carried directly on the login message so a
+// page that calls setClientId() then immediately login() can't race the storage write.
+let currentClientId: string | undefined;
+
 const solid: SolidExtension = {
   get webId() {
     return currentWebId;
   },
   fetch: solidFetch,
   setClientId(clientId: string) {
+    currentClientId = clientId;
     postToContent({ type: 'SOLID_SET_CLIENT_ID', clientId });
   },
   login(webId: string) {
-    return action('SOLID_LOGIN', { webId });
+    return action('SOLID_LOGIN', { webId, clientId: currentClientId });
   },
   logout() {
     return action('SOLID_LOGOUT');

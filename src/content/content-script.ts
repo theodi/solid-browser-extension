@@ -73,6 +73,9 @@ window.addEventListener('message', (event) => {
           type: 'SOLID_LOGIN',
           webId: data.webId,
           origin: window.location.origin,
+          // The page-declared client-id is carried directly (avoids racing the
+          // fire-and-forget setClientId storage write). The worker still validates it.
+          clientId: data.clientId,
         },
         (response) => {
           toPage({

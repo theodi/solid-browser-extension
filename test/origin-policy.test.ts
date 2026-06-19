@@ -5,6 +5,7 @@ import {
   isLoopbackHost,
   isOriginAllowed,
   isTokenEndpoint,
+  isValidClientIdUrl,
 } from '../src/background/core/origin-policy';
 
 describe('computeAllowedOrigins', () => {
@@ -112,5 +113,23 @@ describe('isLoopbackHost', () => {
   });
   it('treats a real host as non-loopback', () => {
     expect(isLoopbackHost('evil.example')).toBe(false);
+  });
+});
+
+describe('isValidClientIdUrl — page-declared client-id transport guard', () => {
+  it('accepts an https client-id document URL', () => {
+    expect(isValidClientIdUrl('https://app.example/client-id.jsonld')).toBe(true);
+  });
+  it('accepts http only for a loopback host (dev)', () => {
+    expect(isValidClientIdUrl('http://localhost:8080/client-id')).toBe(true);
+    expect(isValidClientIdUrl('http://127.0.0.1:8080/client-id')).toBe(true);
+  });
+  it('REJECTS a remote plaintext http client-id (tamperable in transit)', () => {
+    expect(isValidClientIdUrl('http://evil.example/client-id')).toBe(false);
+  });
+  it('rejects a non-http(s) scheme and an unparseable value', () => {
+    expect(isValidClientIdUrl('ftp://x/client-id')).toBe(false);
+    expect(isValidClientIdUrl('javascript:alert(1)')).toBe(false);
+    expect(isValidClientIdUrl('not a url')).toBe(false);
   });
 });

@@ -9,8 +9,8 @@ test('login via popup with Community Solid Server', async ({ context, extensionI
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
   await expect(popupPage.locator('#signed-in')).toBeVisible({ timeout: 10_000 });
 
-  // The <jeswr-account-menu> carries the WebID on its reflected `web-id` attribute.
-  await expect(popupPage.locator('#account-menu')).toHaveAttribute('web-id', /test-pod/, {
+  // The <jeswr-account-menu> reflects the WebID on its `webid` attribute.
+  await expect(popupPage.locator('#account-menu')).toHaveAttribute('webid', /test-pod/, {
     timeout: 10_000,
   });
 });

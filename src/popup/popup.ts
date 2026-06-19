@@ -50,7 +50,8 @@ function showError(message: string): void {
 }
 
 function renderSignedIn(state: SessionState): void {
-  accountMenu.setAttribute('web-id', state.webId ?? '');
+  // <jeswr-account-menu> attributes: `webid`, `name`, `avatar-url` (see the component).
+  accountMenu.setAttribute('webid', state.webId ?? '');
   accountMenu.setAttribute('name', state.name ?? '');
   if (state.photoUrl) accountMenu.setAttribute('avatar-url', state.photoUrl);
   else accountMenu.removeAttribute('avatar-url');

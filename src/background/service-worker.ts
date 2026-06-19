@@ -31,7 +31,7 @@ import { setSignedInIcon, setSignedOutIcon } from './action-icon';
 import { initiateLogin, refreshSession } from './auth-flow';
 import { authenticatedFetch, type FetchSession } from './core/authenticated-fetch';
 import { importDpopKeyPair } from './core/dpop';
-import { computeAllowedOrigins, isLoopbackHost } from './core/origin-policy';
+import { computeAllowedOrigins, isValidClientIdUrl } from './core/origin-policy';
 import { SingleFlight } from './core/single-flight';
 import { parseWebIdProfile } from './core/webid';
 import {
@@ -196,8 +196,12 @@ function broadcastStateChange(webId: string | null): void {
 async function handleLogin(message: LoginRequest): Promise<ActionResult> {
   try {
     const clientIds = await loadClientIds();
-    const clientId =
+    const candidate =
       message.clientId || (message.origin ? clientIds[message.origin] : undefined) || undefined;
+    // A page-declared client-id is only honoured if it is a valid (https / loopback) URL;
+    // an invalid one is ignored (fall back to the extension's own client / dynamic reg)
+    // rather than passing a tamperable plaintext client-id into the auth flow.
+    const clientId = candidate && isValidClientIdUrl(candidate) ? candidate : undefined;
 
     const { session, name, photoUrl } = await initiateLogin({
       webId: message.webId,
@@ -234,10 +238,7 @@ async function handleSetClientId(message: SetClientIdRequest): Promise<ActionRes
     // A Client Identifier Document is a dereferenceable URL. Require HTTPS so it cannot be
     // tampered with in transit; allow http: ONLY for a loopback host (dev CSS). A remote
     // plaintext client-id doc could be rewritten by a network attacker.
-    const url = new URL(message.clientId);
-    const transportOk =
-      url.protocol === 'https:' || (url.protocol === 'http:' && isLoopbackHost(url.hostname));
-    if (!transportOk) {
+    if (!isValidClientIdUrl(message.clientId)) {
       throw new Error('Client identifier must be an https: URL (http: allowed for loopback only).');
     }
     await saveClientId(message.origin, message.clientId);

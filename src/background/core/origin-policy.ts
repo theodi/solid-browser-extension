@@ -125,6 +125,25 @@ export function isOriginAllowed(allowed: ReadonlySet<string>, requestUrl: string
 }
 
 /**
+ * Whether a string is an acceptable Solid-OIDC Client Identifier Document URL: it must
+ * parse as a URL and be `https:`, OR `http:` only for a loopback host (dev). A remote
+ * plaintext client-id document could be tampered with in transit, so cleartext is rejected
+ * for real hosts. PURE; used to validate both a page-declared client-id (setClientId / the
+ * login message) before it is trusted.
+ */
+export function isValidClientIdUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  if (url.protocol === 'http:') return isLoopbackHost(url.hostname);
+  return false;
+}
+
+/**
  * Whether a request URL is the issuer's TOKEN endpoint. The user's access token must
  * NEVER be attached to the token endpoint via the resource-fetch path (it would leak the
  * resource token into a token-management request and could enable a confused-deputy

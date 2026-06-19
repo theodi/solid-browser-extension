@@ -1,6 +1,11 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// This package is `"type": "module"`; Playwright loads this file as ESM, where `__dirname`
+// is not defined. Derive it from `import.meta.url`.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let serverProcess: ChildProcess | null = null;
 

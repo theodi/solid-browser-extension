@@ -1,8 +1,12 @@
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const STATIC_DIR = __dirname;
+// This package is `"type": "module"`; this file is loaded as ESM (by the Playwright e2e
+// global-setup and by scripts/dev.ts), where `__dirname` is not defined. Derive it from
+// `import.meta.url`.
+const STATIC_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
   '.js': 'application/javascript',

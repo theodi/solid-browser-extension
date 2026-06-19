@@ -8,6 +8,10 @@ export default defineConfig({
   use: {
     headless: false,
   },
-  globalSetup: require.resolve('./setup/global-setup'),
-  globalTeardown: require.resolve('./setup/global-teardown'),
+  // Paths are resolved relative to this config file's directory. This package is
+  // `"type": "module"`, so Playwright loads these `.ts` files as ESM — `require` is not
+  // defined in that scope (see the CI ReferenceError this replaced). Use plain relative
+  // strings instead of `require.resolve`.
+  globalSetup: './setup/global-setup.ts',
+  globalTeardown: './setup/global-teardown.ts',
 });

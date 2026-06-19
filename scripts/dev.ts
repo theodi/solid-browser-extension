@@ -3,8 +3,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { startTestSiteServer } from '../test-site/server';
+
+// This package is `"type": "module"`; this script is run as ESM, where `__dirname` is not
+// defined. Derive it from `import.meta.url`.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const CSS_PORT = 3000;
 const BASIC_SITE_PORT = 8080;

@@ -1,7 +1,12 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { startTestSiteServer } from '../../test-site/server';
 import { startCSSServer } from './css-server';
+
+// This package is `"type": "module"`; Playwright loads this file as ESM, where `__dirname`
+// is not defined. Derive it from `import.meta.url`.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const TEST_SITE_PORT = 8080;
 const APP_SITE_PORT = 8081;

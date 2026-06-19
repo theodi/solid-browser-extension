@@ -1,5 +1,10 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { type BrowserContext, test as base, chromium } from '@playwright/test';
+
+// This package is `"type": "module"`; Playwright loads this file as ESM, where `__dirname`
+// is not defined. Derive it from `import.meta.url`.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const test = base.extend<{
   context: BrowserContext;

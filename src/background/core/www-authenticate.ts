@@ -110,17 +110,31 @@ export function parseWwwAuthenticate(header: string): Challenge[] {
 }
 
 /**
- * Whether a 401 response is a PURE DPoP-nonce challenge (RFC 9449 §8): a `DPoP`
- * challenge whose `error` param is exactly `use_dpop_nonce`. Conservative — see the
- * module doc. PURE on the header value via {@link parseWwwAuthenticate}.
+ * Whether a 401 response is a PURE DPoP-nonce challenge (RFC 9449 §8). Conservative — we
+ * retry with a fresh nonce ONLY when:
+ *   (a) at least one `DPoP` challenge carries `error="use_dpop_nonce"`, AND
+ *   (b) NO challenge carries any OTHER auth `error` (e.g. `invalid_token`).
+ *
+ * (b) is the important guard: if the server says BOTH "use a nonce" AND "your token is
+ * invalid/revoked" (a mixed header), retrying with a nonce just loops on a dead token —
+ * we must take the force-refresh path instead. A duplicate/overwritten `error` param, or
+ * any non-nonce error on any challenge, therefore makes this return false. PURE on the
+ * header value via {@link parseWwwAuthenticate}.
  */
 export function isUseDpopNonceChallenge(response: Response): boolean {
   const header = response.headers.get('www-authenticate');
   if (!header) return false;
-  for (const challenge of parseWwwAuthenticate(header)) {
-    if (challenge.scheme.toLowerCase() === 'dpop') {
-      if (challenge.params.get('error') === 'use_dpop_nonce') return true;
+
+  const challenges = parseWwwAuthenticate(header);
+  let sawNonceChallenge = false;
+  for (const challenge of challenges) {
+    const error = challenge.params.get('error');
+    if (challenge.scheme.toLowerCase() === 'dpop' && error === 'use_dpop_nonce') {
+      sawNonceChallenge = true;
+      continue;
     }
+    // Any OTHER auth error anywhere in the header => not a pure nonce challenge.
+    if (error !== undefined && error !== 'use_dpop_nonce') return false;
   }
-  return false;
+  return sawNonceChallenge;
 }

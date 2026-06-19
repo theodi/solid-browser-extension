@@ -31,7 +31,8 @@ import { setSignedInIcon, setSignedOutIcon } from './action-icon';
 import { initiateLogin, refreshSession } from './auth-flow';
 import { authenticatedFetch, type FetchSession } from './core/authenticated-fetch';
 import { importDpopKeyPair } from './core/dpop';
-import { computeAllowedOrigins } from './core/origin-policy';
+import { computeAllowedOrigins, isLoopbackHost } from './core/origin-policy';
+import { SingleFlight } from './core/single-flight';
 import { parseWebIdProfile } from './core/webid';
 import {
   clearProfile,
@@ -54,6 +55,23 @@ let cachedSession: StoredSession | null = null;
 let cachedKeyPair: CryptoKeyPair | null = null;
 /** A cached server DPoP nonce per resource origin, to skip the first §8 round-trip. */
 const nonceByOrigin = new Map<string, string>();
+/**
+ * Single-flight refresh: concurrent near-expiry requests must NOT each start a refresh
+ * with the same (rotation-bound) refresh token — that races, so one grant succeeds and the
+ * others fail with invalid_grant and would wrongly tear down the freshly-refreshed session.
+ * All callers await the one in-flight refresh instead.
+ */
+const refreshGate = new SingleFlight<StoredSession>();
+
+/** Refresh `session` exactly once even under concurrency; rejects on a genuine failure. */
+function refreshOnce(session: StoredSession): Promise<StoredSession> {
+  return refreshGate.run(async () => {
+    const updated = await refreshSession(session);
+    cachedSession = updated;
+    cachedKeyPair = null;
+    return updated;
+  });
+}
 
 /** Load + refresh-if-needed the active session and its (imported) keypair. */
 async function ensureSession(): Promise<{ session: StoredSession; keyPair: CryptoKeyPair } | null> {
@@ -61,15 +79,20 @@ async function ensureSession(): Promise<{ session: StoredSession; keyPair: Crypt
   if (!cachedSession) return null;
 
   if (cachedSession.expiresAt < Date.now() + EXPIRY_BUFFER_MS) {
+    const toRefresh = cachedSession;
     try {
-      cachedSession = await refreshSession(cachedSession);
-      cachedKeyPair = null;
+      await refreshOnce(toRefresh);
     } catch {
-      await teardownSession();
-      return null;
+      // Only tear down if nothing newer has landed: a concurrent single-flight refresh (or
+      // a fresh login) may already have replaced the session this caller tried to refresh.
+      if (cachedSession === toRefresh) {
+        await teardownSession();
+        return null;
+      }
     }
   }
 
+  if (!cachedSession) return null;
   if (!cachedKeyPair) cachedKeyPair = await importDpopKeyPair(cachedSession.dpopKeyPair);
   return { session: cachedSession, keyPair: cachedKeyPair };
 }
@@ -208,10 +231,14 @@ async function handleGetState(): Promise<SessionState> {
 
 async function handleSetClientId(message: SetClientIdRequest): Promise<ActionResult> {
   try {
-    // Validate it parses + is https (or loopback). A client-id is a dereferenceable URL.
+    // A Client Identifier Document is a dereferenceable URL. Require HTTPS so it cannot be
+    // tampered with in transit; allow http: ONLY for a loopback host (dev CSS). A remote
+    // plaintext client-id doc could be rewritten by a network attacker.
     const url = new URL(message.clientId);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-      throw new Error('Client identifier must be an http(s) URL.');
+    const transportOk =
+      url.protocol === 'https:' || (url.protocol === 'http:' && isLoopbackHost(url.hostname));
+    if (!transportOk) {
+      throw new Error('Client identifier must be an https: URL (http: allowed for loopback only).');
     }
     await saveClientId(message.origin, message.clientId);
     return { ok: true };

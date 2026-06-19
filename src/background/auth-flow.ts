@@ -201,6 +201,7 @@ async function completeLogin(callbackUrl: string): Promise<StoredSession> {
   const callback = new URL(callbackUrl).searchParams;
   const code = callback.get('code');
   const returnedState = callback.get('state');
+  const returnedIss = callback.get('iss');
 
   const params = await loadAuthParams();
   if (!params) throw new Error('Login flow not initiated (no auth params).');
@@ -211,6 +212,11 @@ async function completeLogin(callbackUrl: string): Promise<StoredSession> {
   }
   if (returnedState !== params.state) {
     throw new Error('State mismatch — possible CSRF; aborting login.');
+  }
+  // RFC 9207 authorization-server issuer identification — defends against IdP mix-up: if the
+  // AS returned an `iss`, it MUST equal the issuer we started the flow with.
+  if (returnedIss !== null && returnedIss.replace(/\/$/, '') !== params.issuer.replace(/\/$/, '')) {
+    throw new Error('Issuer mismatch in the authorization response — aborting login.');
   }
 
   const keyPair = await generateDpopKeyPair();

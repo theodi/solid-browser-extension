@@ -387,6 +387,131 @@ describe('NO-TOKEN-LEAK invariant', () => {
     );
   });
 
+  // --- Content-Type / body-shape policy (roborev finding: missing-CT must not corrupt binary) ---
+
+  it('a missing-Content-Type Turtle (string) Request body still round-trips as text', async () => {
+    installChrome((m) => {
+      if ((m as { type: string }).type === 'SOLID_FETCH_REQUEST') {
+        return { requestId: (m as { requestId: string }).requestId, status: 201, body: '' };
+      }
+      return activeState();
+    });
+    const c = new MessageBridgeLoginController();
+    await c.restore(); // log in so authenticatedFetch is the proxy
+    // A Request whose body is RDF text but with NO declared content-type. The Solid write
+    // case must keep working: it is valid UTF-8 text, so it must be carried, not rejected.
+    // (Constructing from a string would auto-set text/plain, so build from UTF-8 bytes with
+    // the auto CT removed to exercise the genuinely-missing-CT path.)
+    const turtle = '<#it> a <#Note> ; <#label> "héllo ünïçödé" .';
+    const req = new Request('https://alice.pod.example/c/note.ttl', {
+      method: 'PUT',
+      body: new TextEncoder().encode(turtle),
+    });
+    req.headers.delete('content-type'); // ensure the ambiguous missing-CT path
+    expect(req.headers.get('content-type')).toBeNull();
+
+    const res = await c.authenticatedFetch(req);
+    expect(res.status).toBe(201);
+    const sent = sentMessages.find(
+      (m) => (m as { type?: string }).type === 'SOLID_FETCH_REQUEST',
+    ) as { body: string | null };
+    expect(sent).toBeDefined();
+    expect(sent.body).toBe(turtle); // faithfully decoded, not corrupted
+  });
+
+  it('REJECTS a Request with an EXPLICIT binary content-type (e.g. image/png)', async () => {
+    installChrome((m) => {
+      if ((m as { type: string }).type === 'SOLID_FETCH_REQUEST') {
+        return { requestId: (m as { requestId: string }).requestId, status: 201, body: '' };
+      }
+      return activeState();
+    });
+    const c = new MessageBridgeLoginController();
+    await c.restore(); // log in so authenticatedFetch is the proxy
+    const png = new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])], {
+      type: 'image/png',
+    });
+    const req = new Request('https://alice.pod.example/c/logo.png', { method: 'PUT', body: png });
+    expect(req.headers.get('content-type')).toBe('image/png');
+    await expect(c.authenticatedFetch(req)).rejects.toThrow(/only text request bodies/);
+    // Refused before any wire send — no corrupted write.
+    expect(sentMessages.some((m) => (m as { type?: string }).type === 'SOLID_FETCH_REQUEST')).toBe(
+      false,
+    );
+  });
+
+  it('REJECTS a Request with a binary body and NO content-type (no silent .text() corruption)', async () => {
+    installChrome((m) => {
+      if ((m as { type: string }).type === 'SOLID_FETCH_REQUEST') {
+        return { requestId: (m as { requestId: string }).requestId, status: 201, body: '' };
+      }
+      return activeState();
+    });
+    const c = new MessageBridgeLoginController();
+    await c.restore(); // log in so authenticatedFetch is the proxy
+    // A genuinely binary (non-UTF-8) payload constructed from bytes → the Request carries
+    // NO content-type. This is the ambiguous path the old isTextContentType(null)===true let
+    // through and corrupted; it must now FAIL LOUDLY (detected via the raw bytes).
+    const binary = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0xfe, 0xc0]); // gzip-ish
+    const req = new Request('https://alice.pod.example/c/blob.bin', {
+      method: 'PUT',
+      body: binary,
+    });
+    expect(req.headers.get('content-type')).toBeNull();
+    await expect(c.authenticatedFetch(req)).rejects.toThrow(/only text request bodies/);
+    // Refused before any wire send — the corrupted text was never transmitted.
+    expect(sentMessages.some((m) => (m as { type?: string }).type === 'SOLID_FETCH_REQUEST')).toBe(
+      false,
+    );
+  });
+
+  it('REJECTS a binary body with an EMPTY/whitespace Content-Type (empty CT == missing, roborev 3495)', async () => {
+    installChrome((m) => {
+      if ((m as { type: string }).type === 'SOLID_FETCH_REQUEST') {
+        return { requestId: (m as { requestId: string }).requestId, status: 201, body: '' };
+      }
+      return activeState();
+    });
+    const c = new MessageBridgeLoginController();
+    await c.restore(); // log in so authenticatedFetch is the proxy
+    // An empty (or whitespace-only) Content-Type must be normalised to "missing" so the
+    // byte guard runs — otherwise isTextContentType('')===true let a binary body through and
+    // corrupted it (the empty-header gap roborev job 3495 flagged on the prior fix).
+    const binary = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0xfe, 0xc0]); // gzip-ish
+    const req = new Request('https://alice.pod.example/c/blob.bin', {
+      method: 'PUT',
+      body: binary,
+    });
+    req.headers.set('content-type', '   '); // empty/whitespace-only → must NOT be trusted as text
+    await expect(c.authenticatedFetch(req)).rejects.toThrow(/only text request bodies/);
+    expect(sentMessages.some((m) => (m as { type?: string }).type === 'SOLID_FETCH_REQUEST')).toBe(
+      false,
+    );
+  });
+
+  it('a missing/empty-CT Turtle text body still round-trips (empty CT does not break the Solid write)', async () => {
+    installChrome((m) => {
+      if ((m as { type: string }).type === 'SOLID_FETCH_REQUEST') {
+        return { requestId: (m as { requestId: string }).requestId, status: 201, body: '' };
+      }
+      return activeState();
+    });
+    const c = new MessageBridgeLoginController();
+    await c.restore();
+    const turtle = '<#it> a <#Note> ; <#label> "héllo ünïçödé" .';
+    const req = new Request('https://alice.pod.example/c/note.ttl', {
+      method: 'PUT',
+      body: new TextEncoder().encode(turtle),
+    });
+    req.headers.set('content-type', ''); // empty CT, but valid UTF-8 text → must still carry
+    const res = await c.authenticatedFetch(req);
+    expect(res.status).toBe(201);
+    const sent = sentMessages.find(
+      (m) => (m as { type?: string }).type === 'SOLID_FETCH_REQUEST',
+    ) as { body: string | null };
+    expect(sent.body).toBe(turtle);
+  });
+
   it('authenticatedFetch lets an explicit init override a Request (fetch semantics)', async () => {
     installChrome((m) => {
       if ((m as { type: string }).type === 'SOLID_FETCH_REQUEST') {

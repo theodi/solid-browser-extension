@@ -30,9 +30,11 @@
 
     <main id="content">
       <!-- Signed out: the suite-wide login surface, driven by MessageBridgeLoginController
-           (see popup.ts) so the actual auth still runs in the service worker. -->
+           (see popup.ts) so the actual auth still runs in the service worker. The panel's
+           OWN auto-restore is disabled via the `.autoRestore = false` PROPERTY in popup.ts
+           (NOT a markup attribute — popup.ts owns the restore flow; see the note there). -->
       <section id="signed-out" hidden>
-        <jeswr-login-panel id="login-panel" auto-restore="false"></jeswr-login-panel>
+        <jeswr-login-panel id="login-panel"></jeswr-login-panel>
       </section>
 
       <!-- Restoring / signing in -->

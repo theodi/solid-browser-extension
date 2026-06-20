@@ -23,6 +23,13 @@ import { MessageBridgeLoginController } from './message-bridge-controller';
 
 interface LoginPanelElement extends HTMLElement {
   controller?: MessageBridgeLoginController;
+  /**
+   * The panel's own silent-restore-on-connect. We set this to FALSE (see below): the
+   * popup owns the restore flow (refresh() → SOLID_GET_STATE → renderSignedIn), so the
+   * panel must NOT independently run controller.restore() and flip its internal phase —
+   * which would race the popup's explicit view control inside the #signed-out section.
+   */
+  autoRestore: boolean;
   requestUpdate(): void;
 }
 
@@ -36,13 +43,27 @@ const accountMenu = el('account-menu');
 const shortcutProfile = el<HTMLAnchorElement>('shortcut-profile');
 const pinNudge = el('pin-nudge');
 
+// Disable the panel's OWN silent-restore-on-connect via the PROPERTY (not a markup
+// attribute — `auto-restore="false"` reads ambiguous next to Lit's usual boolean-attribute
+// trap, even though the panel's custom converter would honour it). The popup OWNS the
+// restore flow: the initial paint (bottom of this file) shows "Restoring…" and calls
+// refresh() → SOLID_GET_STATE, which lands a returning user signed-in with no re-auth.
+// Letting the panel ALSO run controller.restore() on connect/swap would have it flip its
+// internal phase ("restoring"→"authenticated"/"idle") independently and race the popup's
+// explicit #signed-out view control. Set it BEFORE the controller is assigned so the
+// willUpdate triggered by that assignment already sees autoRestore=false and never kicks
+// the panel's own restore. The setting persists across the later controller SWAPS in
+// showSignedOut() (same element instance), so the panel stays popup-driven throughout.
+loginPanel.autoRestore = false;
+
 // The bridge: the panel's synchronous LoginController, backed by the worker over the
 // async message protocol. Holds no token — see message-bridge-controller.ts. It is a
 // `let` so we can SWAP it for a fresh instance when transitioning to signed-out: a
 // controller swap is the panel's supported reset path (its willUpdate reconcile drops
-// `_phase` back to the prompt and re-runs restore), which a bare `requestUpdate()`
-// does NOT do — so without the swap an externally-triggered logout could leave the
-// panel showing its stale signed-in view inside the #signed-out section.
+// `_phase` back to the prompt; with autoRestore=false it does NOT re-run restore — which
+// is what we want, the popup re-reads state itself), which a bare `requestUpdate()` does
+// NOT do — so without the swap an externally-triggered logout could leave the panel
+// showing its stale signed-in view inside the #signed-out section.
 let bridge = new MessageBridgeLoginController();
 loginPanel.controller = bridge;
 

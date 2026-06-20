@@ -69,10 +69,18 @@ const STRIPPED_REQUEST_HEADERS = new Set(['authorization', 'dpop']);
 const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
 
 /**
- * Whether a request `Content-Type` is text-safe to carry over the (text-only) protocol.
- * A missing content-type is treated as text (the common Solid case — Turtle/RDF). A
- * `multipart/*` or any non-text/non-json/non-urlencoded type is rejected so a binary
- * body is never silently `.text()`-coerced (which would corrupt the resource write).
+ * Whether an EXPLICIT request `Content-Type` is text-safe to carry over the (text-only)
+ * protocol. NOTE the asymmetry vs. {@link isBinaryRequestBody}, which is intentional:
+ *
+ *   - A PRESENT content-type is authoritative. `multipart/*` and any non-text/non-json/
+ *     non-urlencoded type returns `false` → the body is REJECTED (never silently
+ *     `.text()`-coerced, which would corrupt a binary resource write).
+ *   - A MISSING content-type (`null`) returns `true` here — preserving the common Solid
+ *     RDF (Turtle) write case where a body may arrive without a declared type — BUT the
+ *     ambiguous missing-CT path is NOT trusted blindly: the proxy ALSO runs
+ *     {@link isBinaryRequestBody} over the actual bytes for a missing-CT Request body, so
+ *     a genuinely binary payload with no content-type still fails loudly. See
+ *     `#proxyFetch` for the combined policy.
  */
 function isTextContentType(contentType: string | null): boolean {
   if (!contentType) return true;
@@ -92,6 +100,32 @@ function isTextContentType(contentType: string | null): boolean {
     ct === 'application/n-quads' ||
     ct === 'application/n-triples'
   );
+}
+
+/**
+ * Detect a genuinely BINARY request body by inspecting the raw bytes — the guard for the
+ * AMBIGUOUS "missing Content-Type" path, where the declared type can't tell us whether
+ * the source was a string or a binary blob.
+ *
+ * Why bytes, not the body-source object: a `Request` exposes its body only as an opaque
+ * `ReadableStream`, so we cannot recover whether it was constructed from a string vs a
+ * Blob/ArrayBuffer/typed-array. We CAN, however, decode the bytes as strict UTF-8 and see
+ * whether they round-trip losslessly: a `TextDecoder('utf-8', { fatal: true })` THROWS on
+ * any byte sequence that is not valid UTF-8 (PNG/gzip/most binary). Valid-UTF-8 text — the
+ * Solid Turtle/RDF write case — decodes cleanly and is treated as text. (The Request
+ * constructor itself auto-sets `text/plain` for a string body, so a missing CT already
+ * signals a non-string source; this bytes check is the belt-and-braces confirmation that
+ * still admits the legitimate untyped-text case.)
+ *
+ * Returns `true` ⇒ reject as unsupported binary; `false` ⇒ safe to carry as text.
+ */
+function isBinaryRequestBody(bytes: Uint8Array): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return false; // valid UTF-8 → safe to send as text
+  } catch {
+    return true; // invalid UTF-8 → genuinely binary, must not be text-coerced
+  }
 }
 
 /** Promise-wrap the callback form of `chrome.runtime.sendMessage`. */
@@ -284,9 +318,14 @@ export class MessageBridgeLoginController implements LoginController {
     for (const h of STRIPPED_REQUEST_HEADERS) headers.delete(h);
 
     // Body: init.body wins; otherwise a Request's body. The protocol is text-only today
-    // (binary is a documented future extension), so reject NON-text bodies loudly — both
-    // a non-string `init.body` AND a `Request` carrying a binary/multipart body — rather
-    // than silently text-coercing a binary payload (which would corrupt the write).
+    // (binary is a documented future extension), so reject NON-text bodies LOUDLY rather
+    // than silently text-coercing a binary payload (which would corrupt the write). The
+    // policy (see isTextContentType / isBinaryRequestBody):
+    //   • init.body — a non-string value is binary by construction → reject; a string is text.
+    //   • a Request body with an EXPLICIT non-text Content-Type (multipart/image/…) → reject.
+    //   • a Request body with a missing/ambiguous Content-Type — preserve the common Solid
+    //     RDF (Turtle) untyped-text write, BUT confirm against the raw BYTES: valid UTF-8 is
+    //     sent as text, non-UTF-8 (genuinely binary) is rejected, not corrupted.
     let body: string | null = null;
     if (init?.body != null) {
       if (typeof init.body !== 'string') {
@@ -294,10 +333,24 @@ export class MessageBridgeLoginController implements LoginController {
       }
       body = init.body;
     } else if (isRequest && input.body) {
-      if (!isTextContentType(input.headers.get('content-type'))) {
+      // Normalize an EMPTY / whitespace-only Content-Type to "missing" (null) so it takes
+      // the same ambiguous-but-byte-verified path as a no-Content-Type body — an empty
+      // header must not be trusted as text-safe and bypass the binary guard (roborev 3495).
+      const rawContentType = input.headers.get('content-type');
+      const contentType = rawContentType && rawContentType.trim() !== '' ? rawContentType : null;
+      if (!isTextContentType(contentType)) {
         throw new Error('authenticatedFetch currently supports only text request bodies.');
       }
-      body = await input.clone().text();
+      // Read the bytes once. For an explicitly text-typed body we trust the type and decode;
+      // for the ambiguous MISSING/empty content-type we additionally verify the bytes are valid
+      // UTF-8 text — a binary payload with no usable content-type must fail loudly, not be coerced.
+      const bytes = new Uint8Array(await input.clone().arrayBuffer());
+      if (contentType === null && isBinaryRequestBody(bytes)) {
+        throw new Error(
+          'authenticatedFetch currently supports only text request bodies (binary body with no Content-Type).',
+        );
+      }
+      body = new TextDecoder().decode(bytes);
     }
 
     const requestId = crypto.randomUUID();

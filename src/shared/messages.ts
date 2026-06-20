@@ -65,6 +65,12 @@ export interface FetchResponse {
   readonly error?: string;
 }
 
+/**
+ * The popup's ONLY window into the session — pure display metadata, NO token. This is
+ * what the popup's `MessageBridgeLoginController` mirrors to answer the synchronous
+ * LoginController getters; `recentAccounts` is mapped to `RecentLoginAccount` consumer-side.
+ * No new wire type is needed to adopt `<jeswr-login-panel>`.
+ */
 export interface SessionState {
   readonly webId: string | null;
   readonly isActive: boolean;

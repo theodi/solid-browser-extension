@@ -33,10 +33,12 @@ export async function performLogin(
 ): Promise<void> {
   const popupPage = await context.newPage();
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
-  await popupPage.fill('#webid-input', webId);
+  // The signed-out surface is now <jeswr-login-panel>; drive its shadow parts.
+  // Playwright's CSS engine pierces the (open) shadow root, so `part=` selectors work.
+  await popupPage.fill('#login-panel >>> [part="webid-input"]', webId);
 
   const loginPagePromise = context.waitForEvent('page');
-  await popupPage.click('#login-btn');
+  await popupPage.click('#login-panel >>> [part="login-button"]');
   await completeOidcLogin(await loginPagePromise);
 
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);

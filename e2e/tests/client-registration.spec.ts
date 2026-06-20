@@ -10,10 +10,11 @@ test('default popup login (dynamic registration) authenticates a private fetch',
 }) => {
   const popupPage = await context.newPage();
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);
-  await popupPage.fill('#webid-input', TEST_WEBID);
+  // The signed-out surface is <jeswr-login-panel>; target its shadow parts.
+  await popupPage.fill('#login-panel >>> [part="webid-input"]', TEST_WEBID);
 
   const loginPagePromise = context.waitForEvent('page');
-  await popupPage.click('#login-btn');
+  await popupPage.click('#login-panel >>> [part="login-button"]');
   await completeOidcLogin(await loginPagePromise);
 
   await popupPage.goto(`chrome-extension://${extensionId}/popup/popup.html`);

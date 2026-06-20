@@ -81,115 +81,11 @@ body {
   font-size: 15px;
 }
 
-.subtitle {
-  color: var(--muted-foreground);
-  margin: 0 0 12px;
-}
-
-.section-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin: 4px 0 6px;
-}
-
-/* The signed-out WebID form. Scoped so the bare element styles below never leak
- * onto the @jeswr/solid-elements controls (the suite's CSS-leak guard). */
-#login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-#login-form label {
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
-
-#login-form input {
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: calc(var(--radius) - 0.25rem);
-  background: var(--popover);
-  color: var(--foreground);
-  font-size: 14px;
-}
-
-#login-form input:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
-}
-
-#login-form button.primary {
-  margin-top: 4px;
-  padding: 9px 12px;
-  border: none;
-  border-radius: calc(var(--radius) - 0.25rem);
-  background: var(--primary);
-  color: var(--primary-foreground);
-  font-weight: 600;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-#login-form button.primary:hover {
-  filter: brightness(1.05);
-}
-
-.account-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* The signed-out surface is <jeswr-login-panel>; it owns its own (themed) layout via
+ * the inherited OKLCH tokens. Let it span the popup width and sit flush in the section. */
+#login-panel {
+  display: block;
   width: 100%;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: calc(var(--radius) - 0.2rem);
-  background: var(--popover);
-  color: var(--foreground);
-  cursor: pointer;
-  margin-bottom: 6px;
-  text-align: left;
-}
-
-.account-item:hover {
-  background: var(--accent);
-  color: var(--accent-foreground);
-}
-
-.account-avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: var(--primary);
-  color: var(--primary-foreground);
-  font-weight: 600;
-  overflow: hidden;
-  flex: 0 0 auto;
-}
-
-.account-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.account-name {
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.error {
-  color: var(--destructive);
-  margin: 8px 0 0;
-  font-size: 13px;
 }
 
 .shortcuts {

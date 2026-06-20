@@ -29,22 +29,10 @@
     </div>
 
     <main id="content">
-      <!-- Signed out -->
+      <!-- Signed out: the suite-wide login surface, driven by MessageBridgeLoginController
+           (see popup.ts) so the actual auth still runs in the service worker. -->
       <section id="signed-out" hidden>
-        <p class="subtitle">Sign in with your Solid identity.</p>
-        <div id="recent-accounts"></div>
-        <form id="login-form">
-          <label for="webid-input">WebID or Pod URL</label>
-          <input
-            type="url"
-            id="webid-input"
-            placeholder="https://you.example/profile/card#me"
-            autocomplete="url"
-            required
-          />
-          <button type="submit" id="login-btn" class="primary">Sign in</button>
-        </form>
-        <p id="login-error" class="error" role="alert" hidden></p>
+        <jeswr-login-panel id="login-panel" auto-restore="false"></jeswr-login-panel>
       </section>
 
       <!-- Restoring / signing in -->

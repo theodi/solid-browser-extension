@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=340" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Solid</title>
-  <link rel="stylesheet" href="popup.css" />
+  <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
   <div class="container">
@@ -22,18 +22,11 @@
       <jeswr-theme-toggle></jeswr-theme-toggle>
     </header>
 
-    <!-- First-run nudge: extensions cannot self-pin. -->
-    <div id="pin-nudge" class="pin-nudge" hidden>
-      <span>Pin Solid to your toolbar (puzzle icon &rarr; pin) to keep your account a click away.</span>
-      <button id="pin-nudge-dismiss" type="button" class="link-btn">Got it</button>
-    </div>
-
     <main id="content">
       <!-- Signed out: the suite-wide login surface, driven by MessageBridgeLoginController
-           (see account-surface.ts, shared with the side panel) so the actual auth still
-           runs in the service worker. The panel's OWN auto-restore is disabled via the
-           `.autoRestore = false` PROPERTY in account-surface.ts (NOT a markup attribute —
-           the surface owns the restore flow; see the note there). -->
+           (the SAME token-free, SW-backed seam the popup uses — see account-surface.ts).
+           The panel's OWN auto-restore is disabled via the `.autoRestore = false` PROPERTY
+           in account-surface.ts (NOT a markup attribute); the surface owns the restore flow. -->
       <section id="signed-out" hidden>
         <jeswr-login-panel id="login-panel"></jeswr-login-panel>
       </section>
@@ -55,6 +48,6 @@
       </section>
     </main>
   </div>
-  <script type="module" src="popup.js"></script>
+  <script type="module" src="sidepanel.js"></script>
 </body>
 </html>

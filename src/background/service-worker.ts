@@ -47,6 +47,7 @@ import {
   saveClientId,
   saveProfile,
 } from './session-store';
+import { registerSidePanel } from './side-panel';
 
 const ALLOW_INSECURE_LOOPBACK = true; // dev CSS over http://localhost; harmless for https issuers.
 const EXPIRY_BUFFER_MS = 30_000;
@@ -283,6 +284,10 @@ chrome.runtime.onInstalled.addListener((details) => {
     chrome.storage.local.set({ 'solid:show-pin-nudge': true }).catch(() => {});
   }
 });
+
+// Wire the persistent side panel: a right-click "Open Solid side panel" action-menu entry
+// + its open handler. The toolbar action keeps its existing popup unchanged.
+registerSidePanel();
 
 // Re-hydrate the session + icon on every SW wake.
 ensureSession().then(async (ctx) => {

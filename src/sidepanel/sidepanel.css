@@ -1,0 +1,134 @@
+/* AUTHORED-BY Claude Opus 4.8 */
+/*
+ * Side-panel theme. Same OKLCH token set as the popup (popup.css) so the @jeswr/solid-elements
+ * web components inherit the app-shell tokens through the shadow boundary and theme in lockstep
+ * with the rest of the suite. The side panel is a resizable, full-height surface (vs the popup's
+ * fixed 340px), so the body fills its container rather than pinning a width.
+ */
+
+:root {
+  --background: oklch(0.992 0.003 210);
+  --foreground: oklch(0.21 0.022 235);
+  --border: oklch(0.91 0.012 220);
+  --muted-foreground: oklch(0.5 0.018 230);
+  --primary: oklch(0.52 0.094 205);
+  --primary-foreground: oklch(0.99 0.005 200);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.022 235);
+  --destructive: oklch(0.55 0.2 27);
+  --accent: oklch(0.94 0.03 195);
+  --accent-foreground: oklch(0.31 0.05 215);
+  --ring: oklch(0.52 0.094 205);
+  --radius: 0.7rem;
+  color-scheme: light;
+}
+
+html.dark {
+  --background: oklch(0.18 0.02 240);
+  --foreground: oklch(0.95 0.01 220);
+  --border: oklch(0.32 0.02 235);
+  --muted-foreground: oklch(0.68 0.02 230);
+  --primary: oklch(0.7 0.12 200);
+  --primary-foreground: oklch(0.16 0.02 240);
+  --popover: oklch(0.22 0.02 240);
+  --popover-foreground: oklch(0.95 0.01 220);
+  --destructive: oklch(0.62 0.2 27);
+  --accent: oklch(0.3 0.04 215);
+  --accent-foreground: oklch(0.9 0.03 200);
+  --ring: oklch(0.7 0.12 200);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 240px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  font-size: 14px;
+}
+
+.container {
+  padding: 16px 18px 20px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logo {
+  width: 26px;
+  height: 26px;
+}
+
+.brand-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+/* The signed-out surface is <jeswr-login-panel>; it owns its own (themed) layout via the
+ * inherited OKLCH tokens. Let it span the panel width and sit flush in the section. */
+#login-panel {
+  display: block;
+  width: 100%;
+}
+
+.shortcuts {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shortcut {
+  color: var(--primary);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.shortcut:hover {
+  text-decoration: underline;
+}
+
+#busy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 0;
+  color: var(--muted-foreground);
+}
+
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

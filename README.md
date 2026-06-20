@@ -71,10 +71,16 @@ interface SolidExtension {
 
 - **Login:** Solid-OIDC **authorization-code + PKCE + DPoP**, driven by
   `chrome.identity.launchWebAuthFlow` (a service worker has no `window`). The WebID's
-  `solid:oidcIssuer` is resolved by **proper RDF parsing** (N3.js, not regex). A published
-  Solid-OIDC **Client Identifier Document** is used as the `client_id` (stable consent-screen
-  name), with dynamic registration as the dev fallback. A page may declare its own Client ID
-  Document via `solid.setClientId(...)`.
+  `solid:oidcIssuer` is resolved by **proper RDF parsing** (N3.js, not regex). The extension's
+  own published Solid-OIDC **Client Identifier Document** (committed at `public/clientid.jsonld`,
+  copied into the build, mirrored + shape-tested in `src/background/client-id.ts`) is used as the
+  `client_id` (stable consent-screen name + `token_endpoint_auth_method: "none"` public-client
+  behaviour) **when its hosted URL is reachable**; otherwise the flow falls back to **dynamic
+  client registration**. The hosted URL is a `REPLACE-ME` **placeholder** (`PUBLISHED_CLIENT_ID_URL`)
+  — actually HOSTING the document at a stable HTTPS URL (and pinning the real extension-id
+  `chromiumapp.org` redirect into it) is a **needs:user** step; until then the unreachable
+  placeholder transparently falls back to dynamic registration, so login keeps working. A page
+  may still declare its own Client ID Document via `solid.setClientId(...)`.
 - **Session:** the access + refresh token + the DPoP keypair (as JWK — an MV3 worker is
   killed aggressively and a non-extractable key would be lost on suspension, breaking the
   `jkt`-bound refresh) are persisted in `chrome.storage.local`. The worker proactively
@@ -92,6 +98,18 @@ badge. The **popup is the account UI**: `@jeswr/solid-elements`' `jeswr-account-
 `jeswr-theme-toggle`, a recent-accounts affordance, a pod shortcut, a "restoring" state, and
 a **first-run pin nudge** (extensions can't self-pin). Light/dark themes the popup chrome and
 the web components in lockstep via the app-shell OKLCH tokens.
+
+### The side panel (persistent surface)
+
+For users who want the account UI to **stay open** as they browse (vs the ephemeral popup),
+the extension also ships an MV3 **side panel** (`sidepanel/sidepanel.html`). It renders the
+**identical** signed-in/signed-out surface as the popup — the SAME `@jeswr/solid-elements`
+components driven by the SAME token-free `MessageBridgeLoginController` seam — via the shared
+`mountAccountSurface()` (`src/popup/account-surface.ts`), so there is exactly one copy of the
+view-switching + auth-bridge logic. The popup is unchanged. **Open it** by right-clicking the
+toolbar icon → **"Open Solid side panel"** (a left-click still opens the quick popup; Chrome
+ignores open-on-action-click while a `default_popup` is set, so both surfaces coexist via the
+context-menu entry).
 
 ## Offline
 

@@ -17,3 +17,6 @@ be targeted for re-review / upgrade when Fable returns.
 | `src/{inject,content,popup}/*`, `src/shared/messages.ts`, `src/manifest.json` | `feat/rewrite-core` | re-review/upgrade candidate |
 | `test/*.test.ts` (51 unit cases) + updated `e2e/` suite | `feat/rewrite-core` | re-review/upgrade candidate |
 | `docs/access-management-seam.md`, `README.md`, `CLAUDE.md` updates | `feat/rewrite-core` | re-review/upgrade candidate |
+| MV3 side panel (`src/sidepanel/*`, `src/background/side-panel.ts`) + shared `src/popup/account-surface.ts` (popup/side-panel surface extraction) | `feat/sidepanel-and-clientid` | re-review/upgrade candidate |
+| Static Client ID Document (`public/clientid.jsonld`, `src/background/client-id.ts`) + `auth-flow.ts` published-client-id wiring | `feat/sidepanel-and-clientid` | published-URL hosting = needs:user; re-review/upgrade candidate |
+| `test/{client-id,side-panel}.test.ts` (+21 cases) | `feat/sidepanel-and-clientid` | re-review/upgrade candidate |

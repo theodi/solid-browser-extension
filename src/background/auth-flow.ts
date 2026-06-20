@@ -15,6 +15,7 @@
  */
 
 import * as jose from 'jose';
+import { isPublishedClientIdReachable, PUBLISHED_CLIENT_ID_URL } from './client-id';
 import {
   createDpopProof,
   exportDpopKeyPair,
@@ -33,13 +34,14 @@ import {
 } from './session-store';
 
 /**
- * The extension's own published Client Identifier Document URL. A real deployment serves
- * a JSON-LD Client ID Document (with this extension's `chromiumapp.org` redirect URI) at a
- * stable HTTPS URL and pins it here; until then the value is overridable at runtime via
- * `chrome.storage` (the e2e harness injects a localhost Client ID Document). When unset,
- * the flow falls back to dynamic client registration.
+ * The extension's own published Client Identifier Document URL — see client-id.ts (the
+ * static doc is committed at `public/clientid.jsonld`, copied into the build). This is a
+ * PLACEHOLDER (`REPLACE-ME.example`) until the maintainer hosts the document and pins the
+ * real URL (a needs:user step — see client-id.ts). Because the placeholder is unreachable,
+ * the flow auto-falls-back to dynamic client registration (see initiateLogin), so shipping
+ * the placeholder does NOT break login.
  */
-const DEFAULT_CLIENT_ID = '';
+const DEFAULT_CLIENT_ID = PUBLISHED_CLIENT_ID_URL;
 
 const SCOPE = 'openid webid offline_access';
 
@@ -148,7 +150,17 @@ export async function initiateLogin(
   const config = await fetchOidcConfig(issuer);
   const redirectUri = getRedirectUri();
 
-  let clientId = options.clientId || DEFAULT_CLIENT_ID;
+  // Client-id resolution order:
+  //   1. a page-supplied Client ID Document URL (the page identifying itself), used as-is;
+  //   2. otherwise the extension's OWN published Client ID Document — but ONLY if it is
+  //      actually reachable + self-consistent (the IdP will need to dereference it). The
+  //      shipped value is a placeholder until hosted (needs:user), so this probe fails and
+  //      we fall through to (3) — keeping login working with no published client-id;
+  //   3. dynamic client registration (the fallback), when there is no usable client-id.
+  let clientId = options.clientId || '';
+  if (!clientId && DEFAULT_CLIENT_ID && (await isPublishedClientIdReachable(DEFAULT_CLIENT_ID))) {
+    clientId = DEFAULT_CLIENT_ID;
+  }
   if (!clientId) {
     if (!config.registration_endpoint) {
       throw new Error(

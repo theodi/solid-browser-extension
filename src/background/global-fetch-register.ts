@@ -2,20 +2,23 @@
 /**
  * Programmatic registration of the MAIN-world injection (design §5.1).
  *
- * The manifest already declares the `inject.js` MAIN-world content script. This module ALSO
- * registers it via `chrome.scripting.registerContentScripts({ world: 'MAIN', runAt:
- * 'document_start', persistAcrossSessions: true })` — the most reliable MAIN-world injection
- * (the MetaMask `window.ethereum` pattern). The two are belt-and-braces: the dynamic
+ * This is the SINGLE injection path for `inject.js` into the MAIN world: it registers via
+ * `chrome.scripting.registerContentScripts({ world: 'MAIN', runAt: 'document_start',
+ * persistAcrossSessions: true })` — the most reliable MAIN-world injection (the MetaMask
+ * `window.ethereum` pattern). The manifest does NOT also declare `inject.js` as a MAIN-world
+ * content script (Medium #2): declaring it BOTH ways let it run twice and the second run threw
+ * on the `configurable:false` `Object.defineProperty(window,'solid',…)`. The dynamic
  * registration is idempotent (it removes a stale prior registration first), survives across
- * browser sessions, and gives a single code path to evolve the injection without a manifest
- * edit.
+ * browser sessions (`persistAcrossSessions`), and gives a single code path to evolve the
+ * injection without a manifest edit. (inject.ts ALSO carries a `window.__solidInjected` /
+ * `'solid' in window` guard as defence-in-depth, so even an accidental double-run is inert.)
  *
  * SECURITY NOTE: the injected script is BEST-EFFORT TRANSPARENCY with ZERO security weight
  * (design §5.1) — it is racy + bypassable, and the SW gate remains the sole boundary on every
  * routed request. Registration failing (older Chrome, missing `scripting` permission) is
- * therefore NON-FATAL: the manifest-declared content script still provides the path, and even
- * with NO injection at all the security posture is unchanged (a plain fetch hits the pod and
- * gets a 401 / WAC decision). So this function swallows errors and never throws into SW boot.
+ * therefore NON-FATAL: with NO injection at all the security posture is unchanged (a plain
+ * fetch hits the pod and gets a 401 / WAC decision; the explicit `window.solid` API is simply
+ * unavailable on that page). So this function swallows errors and never throws into SW boot.
  */
 
 const SCRIPT_ID = 'solid-main-world-inject';

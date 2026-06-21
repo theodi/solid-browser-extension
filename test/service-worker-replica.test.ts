@@ -83,6 +83,7 @@ function installCaches(): void {
         });
       },
       delete: async (request: Request) => cacheStore.delete(request.url),
+      keys: async () => [...cacheStore.keys()].map((url) => new Request(url)),
     }),
   };
 }
@@ -439,5 +440,55 @@ describe('Phase-1 shared replica (wired into the service worker)', () => {
     // Both A's and B's entries coexist, keyed apart by WebID — A's were never served to B.
     expect([...cacheStore.values()].some((e) => e.body === 'ALICE-BYTES')).toBe(true);
     expect([...cacheStore.values()].some((e) => e.body === 'BOB-BYTES')).toBe(true);
+  });
+
+  it('LOW #5 (wired): a HEAD request relays NO body to the page', async () => {
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    // The pod stray-returns a body on HEAD; the SW must relay none.
+    fetchImpl = async () =>
+      new Response('HEAD-SHOULD-HAVE-NO-BODY', { status: 200, headers: { etag: 'W/"v1"' } });
+    await loadWorker();
+
+    const res = await sendFetch(
+      {
+        url: 'https://alice.pod.example/x.ttl',
+        method: 'HEAD',
+        stampedOrigin: 'https://pm.example',
+      },
+      { origin: 'https://pm.example', url: 'https://pm.example/app' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toBeUndefined(); // a HEAD response carries no body
+  });
+
+  it('MEDIUM #4 (wired): logout with an UNKNOWN prior WebID purges the CacheStorage BYTES too', async () => {
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    fetchImpl = async () => new Response('USER-DATA', { status: 200, headers: { etag: 'W/"v1"' } });
+    await loadWorker();
+
+    await sendFetch(
+      { url: 'https://alice.pod.example/private/data.ttl', stampedOrigin: 'https://pm.example' },
+      { origin: 'https://pm.example', url: 'https://pm.example/app' },
+    );
+    expect(cacheStore.size).toBeGreaterThanOrEqual(1);
+    expect(idbMeta.size).toBeGreaterThanOrEqual(1);
+
+    // Force the UNKNOWN-prior-WebID branch: drop the session from storage, then RESTART the SW
+    // (fresh module → in-memory cachedSession is null). On the cold worker, teardown's
+    // loadSession() returns null ⇒ priorWebId null ⇒ the null-WebID purge runs. That branch must
+    // still enumerate + delete the CacheStorage bytes (the Medium #4 leak), not just metadata.
+    storage.delete('solid:session');
+    await loadWorker();
+    const out = await sendMessage(
+      { type: 'SOLID_LOGOUT' },
+      { origin: `chrome-extension://${EXTENSION_ID}`, url: '' },
+    );
+    expect(out.ok).toBe(true);
+    // The privacy fix: bytes AND metadata AND nonces are all gone after the null-WebID purge.
+    expect(cacheStore.size).toBe(0);
+    expect(idbMeta.size).toBe(0);
+    expect(idbNonces.size).toBe(0);
   });
 });

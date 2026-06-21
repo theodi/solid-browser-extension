@@ -23,6 +23,7 @@ interface PageMessage {
   body?: string | null;
   webId?: string;
   clientId?: string;
+  autoDivert?: boolean;
 }
 
 function toPage(message: Record<string, unknown>): void {
@@ -45,6 +46,11 @@ window.addEventListener('message', (event) => {
           method: data.method,
           headers: data.headers ?? {},
           body: data.body ?? null,
+          // Forward whether this was the best-effort global-fetch patch (autoDivert) vs an
+          // explicit window.solid.fetch — drives the SW's native-passthrough-vs-403 choice
+          // (High #1). It is a behaviour HINT, never a security input: the SW still runs the
+          // full origin gate; autoDivert only softens a DENY to a plain unauthenticated fetch.
+          autoDivert: data.autoDivert === true,
           // Stamp the REAL page origin (read HERE in the ISOLATED world, not page-supplied)
           // so the worker's per-requesting-origin gate can cross-check it against the
           // browser-attested sender.origin. The worker trusts the browser value, not this.

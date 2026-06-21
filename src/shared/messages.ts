@@ -29,6 +29,20 @@ export interface FetchRequest {
    * sole authority. (Per design §4.3 "Forge the access-control anchor".)
    */
   readonly stampedOrigin?: string;
+  /**
+   * `true` ⇒ this request came from the BEST-EFFORT global-`fetch` transparency patch
+   * (inject.ts §5.1), NOT an explicit `window.solid.fetch(...)` API call. The inject is
+   * deliberately DUMB — it routes EVERY cross-origin request and lets the SW (the sole
+   * boundary) decide. For an auto-diverted request the SW must NEVER hard-fail the page's
+   * normal web traffic: when the gate does not ALLOW (a non-pod target, or an un-granted
+   * requesting origin) the SW performs a plain NATIVE UNAUTHENTICATED passthrough (no token,
+   * no replica) instead of a 403 — so an app's calls to third-party APIs/CDNs are not broken.
+   * Credentials + the replica are applied ONLY on an explicit gate ALLOW. (High #1.)
+   *
+   * An EXPLICIT `window.solid.fetch(...)` (this flag absent/false) keeps the 403 deny — the
+   * caller deliberately asked for the gated fetch, so a deny is the correct, expected result.
+   */
+  readonly autoDivert?: boolean;
 }
 
 export interface LoginRequest {

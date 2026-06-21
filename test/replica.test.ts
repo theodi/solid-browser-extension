@@ -40,6 +40,9 @@ class FakeCache implements ReplicaByteCache {
   async delete(request: Request): Promise<boolean> {
     return this.bytes.delete(request.url);
   }
+  async keys(): Promise<readonly Request[]> {
+    return [...this.bytes.keys()].map((url) => new Request(url));
+  }
 }
 
 /** A trivial in-memory metadata-store double. */
@@ -443,20 +446,187 @@ describe('purgeReplica — synchronous-before-serve logout purge', () => {
     expect(cache.bytes.size).toBe(1);
   });
 
-  it('a null prior WebID purges EVERYTHING (fail-closed: no row survives)', async () => {
+  it('a null prior WebID purges EVERYTHING incl. CacheStorage BYTES (Medium #4: bytes, not just metadata)', async () => {
     const cache = new FakeCache();
     const db = new FakeMetaStore();
-    const egress = scriptedEgress([
-      () => new Response('x', { status: 200, headers: { etag: 'W/"x"' } }),
-    ]);
-    await new SharedReplica({ gate: allow(SCOPE_PM), egress, cache, db, webId: WEBID_A }).read(
-      URL,
-      'GET',
-      { Accept: 'text/turtle' },
-      undefined,
-    );
-    await purgeReplica(cache, db, null);
+    // Seed TWO identities so a null purge must wipe ALL bytes (not just one WebID's rows).
+    for (const [webId, body] of [
+      [WEBID_A, 'a-bytes'],
+      [WEBID_B, 'b-bytes'],
+    ] as const) {
+      const egress = scriptedEgress([
+        () => new Response(body, { status: 200, headers: { etag: 'W/"x"' } }),
+      ]);
+      await new SharedReplica({ gate: allow(SCOPE_PM), egress, cache, db, webId }).read(
+        URL,
+        'GET',
+        { Accept: 'text/turtle' },
+        undefined,
+      );
+    }
+    expect(cache.bytes.size).toBe(2); // bytes present before the purge
+    expect(db.rows.size).toBe(2);
+
+    const purged = await purgeReplica(cache, db, null);
+
+    // After a null purge: NO metadata rows AND NO CacheStorage byte entries remain.
     expect(db.rows.size).toBe(0);
+    expect(cache.bytes.size).toBe(0); // the privacy fix: bytes are GONE, not orphaned
+    expect(purged.bytesDropped).toBe(2);
     expect(db.noncesCleared).toBe(1);
+  });
+
+  it('a null purge with NO enumerator still clears metadata + nonces (defensive default)', async () => {
+    // The default enumerator is cache.keys(); pass a cache whose keys() throws to prove the
+    // metadata + nonce clear still runs (best-effort byte deletion, never load-bearing).
+    const db = new FakeMetaStore();
+    const throwingCache: ReplicaByteCache = {
+      match: async () => undefined,
+      put: async () => {},
+      delete: async () => false,
+      keys: async () => {
+        throw new Error('cache keys unavailable');
+      },
+    };
+    const purged = await purgeReplica(throwingCache, db, null);
+    expect(purged.bytesDropped).toBe(0);
+    expect(db.noncesCleared).toBe(1);
+  });
+});
+
+describe('SharedReplica.read — Medium #3: a non-cacheable 2xx is still returned to the caller', () => {
+  it('a 2xx whose cache.put REJECTS (e.g. 206 / Vary:*) is returned LIVE, just un-cached', async () => {
+    // A cache that rejects put() exactly as the real Cache API does for a 206 Partial Content
+    // or a `Vary: *` response. The successful read must NOT fail — the live body is returned.
+    const db = new FakeMetaStore();
+    let putAttempts = 0;
+    const rejectingPutCache: ReplicaByteCache = {
+      match: async () => undefined,
+      put: async () => {
+        putAttempts++;
+        throw new TypeError('Vary header contains * which is not allowed in cache.put');
+      },
+      delete: async () => false,
+      keys: async () => [],
+    };
+    const egress = scriptedEgress([
+      () =>
+        new Response('partial-bytes', {
+          status: 206,
+          headers: { 'content-range': 'bytes 0-9/100', etag: 'W/"v1"' },
+        }),
+    ]);
+    const result = await new SharedReplica({
+      gate: allow(SCOPE_PM),
+      egress,
+      cache: rejectingPutCache,
+      db,
+      webId: WEBID_A,
+    }).read(URL, 'GET', { Accept: 'text/turtle' }, undefined);
+    if ('deny' in result) throw new Error('unexpected deny');
+    // The request SUCCEEDS with the live body even though the persist failed.
+    expect(result.response.status).toBe(206);
+    expect(await result.response.text()).toBe('partial-bytes');
+    expect(putAttempts).toBe(1); // we DID attempt to cache (best-effort), and tolerated the throw
+    // Nothing persisted: no metadata row was written for the un-cacheable response.
+    expect(db.rows.size).toBe(0);
+  });
+
+  it('a 2xx whose METADATA write rejects is still returned LIVE (best-effort persist)', async () => {
+    const cache = new FakeCache();
+    const db = new FakeMetaStore();
+    // Make the metadata write throw; the live body must still come back.
+    db.putMetadata = async () => {
+      throw new Error('idb write failed');
+    };
+    const egress = scriptedEgress([
+      () => new Response('the-bytes', { status: 200, headers: { etag: 'W/"v1"' } }),
+    ]);
+    const result = await new SharedReplica({
+      gate: allow(SCOPE_PM),
+      egress,
+      cache,
+      db,
+      webId: WEBID_A,
+    }).read(URL, 'GET', { Accept: 'text/turtle' }, undefined);
+    if ('deny' in result) throw new Error('unexpected deny');
+    expect(result.response.status).toBe(200);
+    expect(await result.response.text()).toBe('the-bytes');
+    // The orphaned byte entry (no companion metadata) was best-effort dropped.
+    expect(cache.bytes.size).toBe(0);
+  });
+});
+
+describe('SharedReplica.read — Low #5: a HEAD response carries NO body', () => {
+  let cache: FakeCache;
+  let db: FakeMetaStore;
+  beforeEach(() => {
+    cache = new FakeCache();
+    db = new FakeMetaStore();
+  });
+
+  it('a fresh HEAD egress response is body-stripped (headers/status only)', async () => {
+    // Even if the pod stray-returns a body on HEAD, the replica strips it.
+    const egress = scriptedEgress([
+      () =>
+        new Response('SHOULD-NOT-BE-RETURNED', {
+          status: 200,
+          headers: { etag: 'W/"v1"', 'content-type': 'text/turtle' },
+        }),
+    ]);
+    const result = await new SharedReplica({
+      gate: allow(SCOPE_PM),
+      egress,
+      cache,
+      db,
+      webId: WEBID_A,
+    }).read(URL, 'HEAD', { Accept: 'text/turtle' }, undefined);
+    if ('deny' in result) throw new Error('unexpected deny');
+    expect(result.response.status).toBe(200);
+    expect(await result.response.text()).toBe(''); // NO body
+    // The HEAD did not cache a body (only GET stores), so the cross-method cache stays empty.
+    expect(cache.bytes.size).toBe(0);
+  });
+
+  it('a 304-revalidated HEAD does NOT serve the cached GET body', async () => {
+    // First a GET warms the cache with a body; then a HEAD revalidates to a 304. The HEAD must
+    // serve headers/status only — NEVER the cached GET body (the Low #5 bug).
+    const getEgress = scriptedEgress([
+      () => new Response('CACHED-GET-BODY', { status: 200, headers: { etag: 'W/"v1"' } }),
+    ]);
+    await new SharedReplica({
+      gate: allow(SCOPE_PM),
+      egress: getEgress,
+      cache,
+      db,
+      webId: WEBID_A,
+    }).read(URL, 'GET', { Accept: 'text/turtle' }, undefined);
+    expect(cache.bytes.size).toBe(1);
+
+    const headEgress = scriptedEgress([() => new Response(null, { status: 304 })]);
+    const result = await new SharedReplica({
+      gate: allow(SCOPE_PM),
+      egress: headEgress,
+      cache,
+      db,
+      webId: WEBID_A,
+    }).read(URL, 'HEAD', { Accept: 'text/turtle' }, undefined);
+    if ('deny' in result) throw new Error('unexpected deny');
+    expect(result.fromCache).toBe(true);
+    expect(await result.response.text()).toBe(''); // body stripped — NOT 'CACHED-GET-BODY'
+  });
+
+  it('a HEAD on a non-2xx/non-304 live response is also body-stripped', async () => {
+    const egress = scriptedEgress([() => new Response('error-detail-body', { status: 404 })]);
+    const result = await new SharedReplica({
+      gate: allow(SCOPE_PM),
+      egress,
+      cache,
+      db,
+      webId: WEBID_A,
+    }).read(URL, 'HEAD', { Accept: 'text/turtle' }, undefined);
+    if ('deny' in result) throw new Error('unexpected deny');
+    expect(result.response.status).toBe(404);
+    expect(await result.response.text()).toBe('');
   });
 });

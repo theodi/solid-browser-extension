@@ -249,6 +249,11 @@ async function handleFetch(
   // effect (refresh-token amplification). The browser-attested sender is the authority.
   const requestingOrigin = resolveRequestingOrigin(sender, message.stampedOrigin);
   if (requestingOrigin === null) {
+    // HIGH #1: a forged/opaque origin on the EXPLICIT path is a 403. But an `autoDivert`
+    // request (the global-fetch patch) must never hard-fail the page — and crucially this
+    // early-reject path is reached BEFORE any session work, so no credential is in scope. A
+    // native unauthenticated passthrough is therefore safe (no token) and preserves page compat.
+    if (message.autoDivert) return await nativePassthrough(message);
     return {
       requestId: message.requestId,
       status: 403,
@@ -257,7 +262,12 @@ async function handleFetch(
   }
 
   const ctx = await ensureSession();
-  if (!ctx) return { requestId: message.requestId, error: 'Not authenticated' };
+  if (!ctx) {
+    // No session: the explicit path reports "Not authenticated"; an autoDivert request just does
+    // the plain fetch the page would have done itself (no credential exists to attach anyway).
+    if (message.autoDivert) return await nativePassthrough(message);
+    return { requestId: message.requestId, error: 'Not authenticated' };
+  }
 
   try {
     const fetchSession = await buildFetchSession(ctx.session, ctx.keyPair);
@@ -316,7 +326,20 @@ async function handleFetch(
       : await replica.write(message.url, message.method, message.headers, message.body, nonce);
 
     if ('deny' in result) {
-      // The gate denied (incl. on a would-be cache hit) — relay the 403 verbatim.
+      // The gate denied (incl. on a would-be cache hit). The replica touched NEITHER the pod
+      // NOR the cache before denying, so nothing leaked.
+      //
+      // HIGH #1 — page-compat invariant: a request that came from the BEST-EFFORT global-fetch
+      // transparency patch (`autoDivert`) must NEVER be hard-failed. The patch routes EVERY
+      // cross-origin request, so a DENY here is the common case for an app's NORMAL traffic to
+      // a third-party API/CDN (a non-pod target) or from an un-granted origin. For those we do
+      // a plain NATIVE UNAUTHENTICATED passthrough — NO token, NO replica, NO 403 — so the page
+      // behaves exactly as if the extension were not installed. This can never widen access (a
+      // native fetch carries no credential). An EXPLICIT `window.solid.fetch` (autoDivert false)
+      // keeps the 403: the caller deliberately asked for the gated path.
+      if (message.autoDivert) {
+        return await nativePassthrough(message);
+      }
       return {
         requestId: message.requestId,
         status: result.deny.status,
@@ -330,12 +353,14 @@ async function handleFetch(
     // Defense-in-depth: relay only the allowlisted, app-relevant response headers back to
     // the page rather than every header the server emitted (see response-headers.ts).
     const headers = filterResponseHeaders(result.response.headers);
+    // A HEAD response carries NO body (Low #5) — the replica already strips it; relay no body.
+    const isHead = message.method.toUpperCase() === 'HEAD';
     return {
       requestId: message.requestId,
       status: result.response.status,
       statusText: result.response.statusText,
       headers,
-      body: await result.response.text(),
+      body: isHead ? undefined : await result.response.text(),
     };
   } catch (err) {
     return {
@@ -348,6 +373,59 @@ async function handleFetch(
 /** A small Response carrying a gate-deny reason, for the replica's injected gate port. */
 function denyResponse(error: string): Response {
   return new Response(error, { status: 403 });
+}
+
+/** Caller-supplied auth/transport headers a page must never inject onto a passthrough fetch. */
+const PASSTHROUGH_STRIP_HEADERS = new Set([
+  'authorization',
+  'dpop',
+  'host',
+  'content-length',
+  'connection',
+  'cookie',
+]);
+
+/**
+ * A plain, UNAUTHENTICATED native passthrough for an `autoDivert` request the gate did not
+ * ALLOW (High #1). No access token, no DPoP proof, no replica — exactly the fetch the page
+ * would have made itself had the global-fetch patch not been installed, so an app's normal
+ * traffic to a third-party API/CDN (or a pod read from an un-granted origin) is never broken.
+ *
+ * SECURITY: this carries ZERO credential, so it can never widen access. We still STRIP any
+ * page-supplied `Authorization`/`DPoP`/`Cookie`/transport headers (defence-in-depth: a page
+ * cannot smuggle its own auth header through the extension's privileged fetch), and we relay
+ * only the allowlisted response headers, identically to the gated path.
+ */
+async function nativePassthrough(message: FetchRequest): Promise<FetchResponse> {
+  const safeHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(message.headers)) {
+    if (!PASSTHROUGH_STRIP_HEADERS.has(k.toLowerCase())) safeHeaders[k] = v;
+  }
+  try {
+    const isRead = READ_METHODS.has(message.method.toUpperCase());
+    const response = await fetch(message.url, {
+      method: message.method,
+      headers: safeHeaders,
+      body: isRead ? undefined : message.body,
+      // Never attach the user's ambient cookies to a cross-origin proxied request.
+      credentials: 'omit',
+    });
+    const headers = filterResponseHeaders(response.headers);
+    // A HEAD response must carry no body (Low #5); a GET/other relays the text body.
+    const isHead = message.method.toUpperCase() === 'HEAD';
+    return {
+      requestId: message.requestId,
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+      body: isHead ? undefined : await response.text(),
+    };
+  } catch (err) {
+    return {
+      requestId: message.requestId,
+      error: err instanceof Error ? err.message : 'Fetch failed',
+    };
+  }
 }
 
 /** Best-effort: fetch + parse the WebID profile (name/photo) and persist it. */

@@ -93,6 +93,14 @@ export interface ReplicaByteCache {
   match(request: Request, options?: CacheQueryOptions): Promise<Response | undefined>;
   put(request: Request, response: Response): Promise<void>;
   delete(request: Request, options?: CacheQueryOptions): Promise<boolean>;
+  /**
+   * Enumerate every cached byte-entry key. Used by the null-WebID logout purge (MEDIUM #4) to
+   * delete ALL replica bytes when the prior identity is unknown — without it, that purge clears
+   * metadata but LEAKS the CacheStorage bytes (a privacy hole on an unknown-prior logout/reset).
+   * The live Cache API provides `keys()`; the SW's named replica cache holds ONLY replica
+   * entries, so every key it returns is a replica byte entry safe to drop.
+   */
+  keys(request?: Request, options?: CacheQueryOptions): Promise<readonly Request[]>;
 }
 
 /**
@@ -111,13 +119,30 @@ function withConditional(
   return { ...headers, [conditional.name]: conditional.value };
 }
 
-/** Reconstruct a servable Response from cached bytes + the stored metadata's status/headers. */
-function responseFromCache(bytes: Response, meta: ReplicaMetadata): Response {
+/**
+ * Reconstruct a servable Response from cached bytes + the stored metadata's status/headers.
+ * `bodyless` (a HEAD request) drops the body so a HEAD response carries NO entity body (Low #5)
+ * — the cache stores the GET representation, but a HEAD must reply headers/status only.
+ */
+function responseFromCache(bytes: Response, meta: ReplicaMetadata, bodyless: boolean): Response {
   const headers = new Headers(bytes.headers);
   if (meta.etag && !headers.has('etag')) headers.set('etag', meta.etag);
   if (meta.contentType && !headers.has('content-type'))
     headers.set('content-type', meta.contentType);
-  return new Response(bytes.body, { status: meta.status, headers });
+  return new Response(bodyless ? null : bytes.body, { status: meta.status, headers });
+}
+
+/**
+ * Strip the body from a live response for a HEAD request (Low #5). A HEAD response must have
+ * the same headers/status as the GET would, but NO entity body. A pod SHOULD already omit the
+ * body on HEAD; this enforces it regardless of what the egress returned.
+ */
+function bodylessForHead(response: Response): Response {
+  return new Response(null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 export interface ReplicaConfig {
@@ -152,6 +177,10 @@ export class SharedReplica {
     const decision = await this.cfg.gate();
     if ('deny' in decision) return { deny: decision.deny };
 
+    // Low #5: a HEAD response must carry NO body — neither the cached GET body (304 path) nor a
+    // pod's stray HEAD body. Track it so every served path strips the body for HEAD.
+    const isHead = method.toUpperCase() === 'HEAD';
+
     const scope: ReplicaScope = { webId: this.cfg.webId, grantScope: decision.grantScope };
     const varyKey = computeVaryKey(headers.Accept ?? headers.accept);
     const keyReq = replicaKeyRequest(scope, url, varyKey);
@@ -160,7 +189,11 @@ export class SharedReplica {
     // No WebID / no grant-scope ⇒ un-keyable ⇒ never cache: a plain authenticated egress.
     if (keyReq === null || metaKey === null) {
       const { response, nonce: n } = await this.cfg.egress.fetch(url, method, headers, null, nonce);
-      return { response, fromCache: false, nonce: n };
+      return {
+        response: isHead ? bodylessForHead(response) : response,
+        fromCache: false,
+        nonce: n,
+      };
     }
 
     const cachedBytes = await this.cfg.cache.match(keyReq, IGNORE_VARY);
@@ -180,27 +213,34 @@ export class SharedReplica {
     );
 
     // 304 Not Modified: the provisional cached body is confirmed fresh — serve it, touch it.
+    // For a HEAD, serve the headers/status only (no cached body — Low #5).
     if (response.status === 304 && cachedBytes && meta) {
       await this.cfg.db.putMetadata({ ...meta, fetchedAt: Date.now() });
       return {
-        response: responseFromCache(cachedBytes.clone(), meta),
+        response: responseFromCache(cachedBytes.clone(), meta, isHead),
         fromCache: true,
         nonce: serverNonce,
       };
     }
 
     // 2xx: replace the shared replica bytes + metadata FROM the pod's response (never-stale).
+    // Only a GET has a body to cache; a HEAD never reaches store() (so no body is persisted).
     if (response.status >= 200 && response.status < 300 && method.toUpperCase() === 'GET') {
       const stored = await this.store(scope, url, varyKey, metaKey, keyReq, response);
       return { response: stored, fromCache: false, nonce: serverNonce };
     }
 
     // Any other status (incl. a now-403/404 — access changed, or not-found): do NOT serve a
-    // stale cached body; surface the live response. Drop any now-invalid cached entry.
+    // stale cached body; surface the live response. Drop any now-invalid cached entry. A HEAD's
+    // live response is body-stripped (Low #5).
     if (cachedBytes || meta) {
       await this.invalidate(metaKey, keyReq);
     }
-    return { response, fromCache: false, nonce: serverNonce };
+    return {
+      response: isHead ? bodylessForHead(response) : response,
+      fromCache: false,
+      nonce: serverNonce,
+    };
   }
 
   /**
@@ -252,7 +292,17 @@ export class SharedReplica {
     return { response, fromCache: false, nonce: serverNonce };
   }
 
-  /** Store a 2xx GET response's bytes + metadata under the security-scoped key. */
+  /**
+   * Store a 2xx GET response's bytes + metadata under the security-scoped key.
+   *
+   * MEDIUM #3 — caching is BEST-EFFORT, never load-bearing for the request. The Cache API
+   * REJECTS `put()` for some valid 2xx responses (a `206 Partial Content`, a `Vary: *`
+   * response — see the Cache API spec). The replica is "never authoritative" (the bytes are
+   * provisional), so a failed persist must NEVER fail the request: we clone the live response
+   * UP FRONT, attempt the persist, and on ANY failure (cache.put OR the metadata write) skip
+   * persistence and return the LIVE response unchanged. Worst case the next read is a cold
+   * miss — correct, just un-cached.
+   */
   private async store(
     scope: ReplicaScope,
     url: string,
@@ -261,20 +311,30 @@ export class SharedReplica {
     keyReq: Request,
     response: Response,
   ): Promise<Response> {
-    // Clone so the caller still gets a live body; store the clone UN-mutated under the key.
-    await this.cfg.cache.put(keyReq, response.clone());
-    const record: ReplicaMetadata = {
-      key: metaKey,
-      webId: scope.webId as string,
-      grantScope: scope.grantScope as string,
-      resourceUrl: url,
-      varyKey,
-      etag: response.headers.get('etag') ?? undefined,
-      contentType: response.headers.get('content-type') ?? undefined,
-      status: response.status,
-      fetchedAt: Date.now(),
-    };
-    await this.cfg.db.putMetadata(record);
+    // Clone BEFORE any await so the caller's live body is preserved even if the persist throws.
+    const toStore = response.clone();
+    try {
+      // Store the clone UN-mutated under the key.
+      await this.cfg.cache.put(keyReq, toStore);
+      const record: ReplicaMetadata = {
+        key: metaKey,
+        webId: scope.webId as string,
+        grantScope: scope.grantScope as string,
+        resourceUrl: url,
+        varyKey,
+        etag: response.headers.get('etag') ?? undefined,
+        contentType: response.headers.get('content-type') ?? undefined,
+        status: response.status,
+        fetchedAt: Date.now(),
+      };
+      await this.cfg.db.putMetadata(record);
+    } catch {
+      // Non-cacheable 2xx (206 / Vary:* / quota) — skip persistence, serve the live response.
+      // Best-effort defence: if the bytes landed but the metadata write failed, the orphaned
+      // byte entry would be un-keyable on a later read (no metadata ⇒ no conditional ⇒ treated
+      // as a cold miss + overwritten), so leaving it is harmless; we still try to drop it.
+      await this.cfg.cache.delete(keyReq, IGNORE_VARY).catch(() => false);
+    }
     return response;
   }
 
@@ -301,12 +361,20 @@ function lowerKeys(headers: Record<string, string>): Record<string, true> {
  *
  * `webId === null` (a logout where the prior WebID is unknown / a full reset) drops EVERYTHING
  * — fail-closed: when in doubt, purge all, never leave a row behind.
+ *
+ * MEDIUM #4 — the null-WebID branch must delete the CacheStorage BYTES too, not just metadata.
+ * Previously it cleared metadata only (no byte enumeration), so an unknown-prior logout/reset
+ * LEFT replica byte entries in CacheStorage — a privacy leak. It now enumerates every replica
+ * byte key (via the injected `enumerateCacheKeys`, defaulting to `cache.keys()` — the SW's
+ * named replica cache holds only replica entries) and deletes each, so bytes AND metadata AND
+ * nonces are all gone after a null purge.
  */
 export async function purgeReplica(
   cache: ReplicaByteCache,
   db: ReplicaMetaStore,
   webId: string | null,
-  cacheKeysForWebId?: () => Promise<Request[]>,
+  /** Test seam: enumerate every replica byte key. Defaults to the live `cache.keys()`. */
+  enumerateCacheKeys: () => Promise<readonly Request[]> = () => cache.keys(),
 ): Promise<{ bytesDropped: number; metaDropped: number }> {
   let metaDropped = 0;
   let bytesDropped = 0;
@@ -324,11 +392,11 @@ export async function purgeReplica(
     await db.deleteMetadataByWebId(webId);
     metaDropped = rows.length;
   } else {
-    // Unknown prior identity → purge ALL replica state (fail-closed, no row survives).
-    if (cacheKeysForWebId) {
-      for (const keyReq of await cacheKeysForWebId()) {
-        if (await cache.delete(keyReq, IGNORE_VARY).catch(() => false)) bytesDropped++;
-      }
+    // Unknown prior identity → purge ALL replica state (fail-closed, no row survives). Delete
+    // every cached byte entry by enumerating the cache keys, THEN clear the metadata.
+    const keys = await enumerateCacheKeys().catch(() => [] as readonly Request[]);
+    for (const keyReq of keys) {
+      if (await cache.delete(keyReq, IGNORE_VARY).catch(() => false)) bytesDropped++;
     }
     await db.clearMetadata();
   }

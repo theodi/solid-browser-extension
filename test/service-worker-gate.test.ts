@@ -81,6 +81,7 @@ function installCaches(): void {
         });
       },
       delete: async (request: Request) => cacheStore.delete(request.url),
+      keys: async () => [...cacheStore.keys()].map((url) => new Request(url)),
     }),
   };
 }
@@ -604,5 +605,179 @@ describe('SOLID_GET_STATE scopes the WebID (PII) to granted origins', () => {
       { origin: 'https://attacker.example', url: 'https://attacker.example/x' }, // real sender
     );
     expect(res.webId).toBeNull();
+  });
+});
+
+describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un-granted traffic', () => {
+  it('an autoDivert fetch to a NON-POD third party PASSES THROUGH as a plain native fetch (NOT a 403)', async () => {
+    // The page-compat regression: an app calls a third-party API/CDN. The global-fetch patch
+    // routes it (autoDivert=true). The SW gate denies (foreign target), but for an autoDivert
+    // request that must become a PLAIN UNAUTHENTICATED passthrough, not a 403 that breaks the app.
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    fetchImpl = async () => new Response('third-party-json', { status: 200 });
+    await loadWorker();
+
+    const res = await sendFetch(
+      {
+        url: 'https://api.thirdparty.example/data',
+        stampedOrigin: 'https://pm.example',
+        autoDivert: true,
+      },
+      { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
+    );
+
+    // The app's normal request SUCCEEDS (the extension is invisible to it).
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('third-party-json');
+    expect(res.error).toBeUndefined();
+    // The third party WAS reached — as a PLAIN fetch with NO credential attached.
+    const call = fetchCalls.find((c) => c.url.startsWith('https://api.thirdparty.example'));
+    expect(call).toBeDefined();
+    const headers = (call?.init?.headers as Record<string, string>) ?? {};
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers.DPoP).toBeUndefined();
+  });
+
+  it('the SAME non-pod request WITHOUT autoDivert (explicit window.solid.fetch) DOES return 403', async () => {
+    // Contrast: an explicit window.solid.fetch deliberately asked for the gated path, so a
+    // foreign-target deny is the correct, expected 403 — only autoDivert softens to passthrough.
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    await loadWorker();
+
+    const res = await sendFetch(
+      { url: 'https://api.thirdparty.example/data', stampedOrigin: 'https://pm.example' }, // no autoDivert
+      { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
+    );
+
+    expect(res.status).toBe(403);
+    expect(res.error).toBe('Cross-origin fetch denied');
+    expect(fetchCalls.some((c) => c.url.startsWith('https://api.thirdparty.example'))).toBe(false);
+  });
+
+  it('an autoDivert POD read from an UN-GRANTED origin passes through UNAUTHENTICATED (no creds, no 403)', async () => {
+    // A non-granted app's global fetch hits the pod. Per the invariant it must not hard-fail; it
+    // gets a plain unauthenticated fetch (the pod returns its own 401/WAC), never the credential.
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']); // ungranted.example is NOT granted
+    fetchImpl = async () => new Response('pod-public-or-401', { status: 401 });
+    await loadWorker();
+
+    const res = await sendFetch(
+      {
+        url: 'https://alice.pod.example/private/notes.ttl',
+        stampedOrigin: 'https://ungranted.example',
+        autoDivert: true,
+      },
+      { origin: 'https://ungranted.example', url: 'https://ungranted.example/x' },
+    );
+
+    // Not a gate-403 — the pod's own response is relayed (a 401 here), proving native passthrough.
+    expect(res.status).toBe(401);
+    // The egress to the pod carried NO credential (unauthenticated passthrough).
+    const podCall = fetchCalls.find((c) => c.url.startsWith('https://alice.pod.example'));
+    expect(podCall).toBeDefined();
+    const headers = (podCall?.init?.headers as Record<string, string>) ?? {};
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers.DPoP).toBeUndefined();
+  });
+
+  it('a GRANTED pod read still gets the AUTHENTICATED replica path even with autoDivert set', async () => {
+    // autoDivert must NOT downgrade a legitimate granted pod read — that is still gated+authed.
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    fetchImpl = async () =>
+      new Response('private-pod-bytes', { status: 200, headers: { etag: 'W/"v1"' } });
+    await loadWorker();
+
+    const res = await sendFetch(
+      {
+        url: 'https://alice.pod.example/private/notes.ttl',
+        stampedOrigin: 'https://pm.example',
+        autoDivert: true,
+      },
+      { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('private-pod-bytes');
+    const podCall = fetchCalls.find((c) => c.url.startsWith('https://alice.pod.example'));
+    const headers = (podCall?.init?.headers as Record<string, string>) ?? {};
+    // The DPoP-bound credential WAS attached (the authenticated path, not passthrough).
+    expect(headers.Authorization).toBe('DPoP access-token-xyz');
+    expect(headers.DPoP).toBeDefined();
+  });
+
+  it('a native passthrough STRIPS any page-supplied Authorization/DPoP/Cookie header (defence-in-depth)', async () => {
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    fetchImpl = async () => new Response('ok', { status: 200 });
+    await loadWorker();
+
+    const res = await sendFetch(
+      {
+        url: 'https://api.thirdparty.example/data',
+        stampedOrigin: 'https://pm.example',
+        autoDivert: true,
+        headers: {
+          Authorization: 'Bearer page-smuggled',
+          DPoP: 'page-proof',
+          Cookie: 'sid=1',
+          'X-App': 'keep',
+        },
+      },
+      { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
+    );
+
+    expect(res.status).toBe(200);
+    const call = fetchCalls.find((c) => c.url.startsWith('https://api.thirdparty.example'));
+    const headers = (call?.init?.headers as Record<string, string>) ?? {};
+    // The page cannot smuggle its own auth/cookie through the extension's privileged fetch.
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers.DPoP).toBeUndefined();
+    expect(headers.Cookie).toBeUndefined();
+    // A benign app header survives.
+    expect(headers['X-App']).toBe('keep');
+  });
+
+  it('an autoDivert request to an OPAQUE/forged origin still passes through (never hard-fails the page)', async () => {
+    // Even a dual-origin mismatch (which would DENY the gated path) becomes a plain passthrough
+    // under autoDivert — the invariant is that normal web traffic is never broken. No credential
+    // is ever attached on this path, so passthrough cannot widen access.
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    fetchImpl = async () => new Response('cdn-asset', { status: 200 });
+    await loadWorker();
+
+    const res = await sendFetch(
+      { url: 'https://cdn.example/lib.js', stampedOrigin: 'https://pm.example', autoDivert: true },
+      { origin: 'https://attacker.example', url: 'https://attacker.example/x' }, // sender ≠ stamp
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('cdn-asset');
+    const call = fetchCalls.find((c) => c.url.startsWith('https://cdn.example'));
+    const headers = (call?.init?.headers as Record<string, string>) ?? {};
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('an autoDivert fetch with NO session passes through natively (the explicit path says Not authenticated)', async () => {
+    // No session seeded. The explicit window.solid.fetch returns "Not authenticated"; an
+    // autoDivert request just does the plain fetch the page would have done (no creds exist).
+    fetchImpl = async () => new Response('public-resource', { status: 200 });
+    await loadWorker();
+
+    const res = await sendFetch(
+      {
+        url: 'https://api.thirdparty.example/data',
+        stampedOrigin: 'https://pm.example',
+        autoDivert: true,
+      },
+      { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('public-resource');
+    expect(res.error).toBeUndefined();
   });
 });

@@ -85,6 +85,25 @@ function installSolidInjection(): void {
   // never a cross-origin proxy and native CORS / credentials / header semantics are preserved.
   const PRISTINE_FETCH = window.fetch.bind(window);
 
+  /**
+   * Duck-type a `URL`-like input rather than `instanceof URL`. `instanceof` is CROSS-REALM
+   * UNRELIABLE: a `URL` minted in another JS realm (an iframe, or — in tests — a JSDOM window
+   * whose `URL` differs from the module's bare-global `URL`) is NOT an instance of the realm-local
+   * `URL`, so `input instanceof URL` would wrongly be `false` and we'd mis-classify the input
+   * (treating a cross-origin pod URL as same-origin and skipping the gate). A `RequestInfo | URL`
+   * that is a non-null object exposing a string `href` is a URL (a `Request` has no `href` — it
+   * carries `url` — so this never mis-takes a `Request` for a `URL`). `WHATWG URL` is fully
+   * specified by its `href`, so we snapshot/serialise via `href` and never depend on identity.
+   */
+  function urlLike(input: unknown): input is URL {
+    return (
+      typeof input === 'object' &&
+      input !== null &&
+      'href' in input &&
+      typeof (input as { href: unknown }).href === 'string'
+    );
+  }
+
   const pendingFetches = new Map<string, PendingFetch>();
   const pendingActions = new Map<string, Pending<void>>();
 
@@ -154,9 +173,24 @@ function installSolidInjection(): void {
   ): Promise<Response> {
     return new Promise((resolve, reject) => {
       const requestId = crypto.randomUUID();
-      // Retain the ORIGINAL input/init so a passthrough sentinel can be completed with the
-      // page's own native fetch verbatim (round-2 High #1).
-      pendingFetches.set(requestId, { resolve, reject, input, init });
+      // Retain the input/init so a passthrough sentinel can be completed with the page's own
+      // native fetch verbatim (round-2 High #1). SNAPSHOT them at CALL TIME (round-3 Medium):
+      // native `fetch` reads the URL/init synchronously, but a passthrough fetch happens only
+      // AFTER the async SW round-trip — so without a snapshot, a page that mutates the `URL`,
+      // the `Headers`, or `init.credentials` between the call and the sentinel would change the
+      // eventual request. Copy the URL (a mutable `URL` object), the init object, and the
+      // headers into fresh values so a later mutation of the caller's objects cannot leak in. A
+      // string input + string body are immutable, so they need no copy. A `URL` is detected by
+      // duck-typing (`urlLike`, cross-realm-safe) and snapshotted to its `href` STRING: a WHATWG
+      // URL is fully specified by `href`, native fetch accepts a string URL identically, and a
+      // string can't be mutated — so a later `url.pathname = …` on the caller's object cannot leak
+      // into the deferred passthrough. (Snapshotting to a fresh `URL` would also work but only if
+      // `URL` is the same realm; a string is robust in both browser and JSDOM.)
+      const snapInput: RequestInfo | URL = urlLike(input) ? input.href : input;
+      const snapInit: RequestInit | undefined = init
+        ? { ...init, ...(init.headers ? { headers: new Headers(init.headers) } : {}) }
+        : undefined;
+      pendingFetches.set(requestId, { resolve, reject, input: snapInput, init: snapInit });
       let body: string | null = null;
       if (init?.body != null) {
         if (typeof init.body !== 'string') {
@@ -259,11 +293,7 @@ function installSolidInjection(): void {
   function shouldDivert(input: RequestInfo | URL): boolean {
     try {
       const url = new URL(
-        typeof input === 'string'
-          ? input
-          : input instanceof URL
-            ? input.href
-            : (input as Request).url,
+        typeof input === 'string' ? input : urlLike(input) ? input.href : (input as Request).url,
         window.location.href,
       );
       if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
@@ -280,7 +310,7 @@ function installSolidInjection(): void {
       // currently serialise structurally — pass it through solidFetch via its URL + init only
       // for the simple (string/URL) case; a complex Request falls back to native fetch (the SW
       // gate still governs the eventual pod read if the app re-issues it through window.solid).
-      if (typeof input === 'string' || input instanceof URL) {
+      if (typeof input === 'string' || urlLike(input)) {
         // autoDivert=true: this is the transparency patch, NOT an explicit window.solid.fetch —
         // the SW native-passes-through (no 403) when the request is non-pod / un-granted (High #1).
         return solidFetch(input, init, true);

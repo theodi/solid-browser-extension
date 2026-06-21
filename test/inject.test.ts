@@ -180,11 +180,57 @@ describe('inject — Round-2 High #1: a passthrough sentinel is completed by the
     // The promise resolved with the PAGE's native fetch result (the SW gave no bytes).
     expect(await response.text()).toBe('NATIVE-IN-PAGE-BYTES');
     expect(response.status).toBe(207);
-    // PRISTINE_FETCH was called with the ORIGINAL input + init (CORS/creds/header fidelity).
+    // PRISTINE_FETCH was called with the ORIGINAL input + a faithful init SNAPSHOT (round-3
+    // Medium: the init is COPIED at call time, so it is value-equal but NOT the same reference).
     expect(nativeFetch).toHaveBeenCalledTimes(1);
-    const [calledInput, calledInit] = nativeFetch.mock.calls[0];
+    const [calledInput, calledInit] = nativeFetch.mock.calls[0] as [string, RequestInit];
     expect(calledInput).toBe('https://api.thirdparty.example/data');
-    expect(calledInit).toBe(init);
+    expect(calledInit).not.toBe(init); // a snapshot copy, not the caller's object
+    expect(calledInit.method).toBe('POST');
+    expect(calledInit.body).toBe('payload');
+    expect(new Headers(calledInit.headers).get('X-App')).toBe('v1');
+  });
+
+  it('round-3 Medium: the passthrough request is SNAPSHOT at call time — a later mutation of init.headers / init.credentials / a URL input cannot change it', async () => {
+    await importInject();
+    posted.length = 0;
+    nativeFetch.mockResolvedValueOnce(new Response('OK', { status: 200 }));
+
+    // A mutable URL object + an init the caller will mutate AFTER the call (as native fetch would
+    // have already snapshotted them synchronously).
+    const url = new dom.window.URL('https://api.thirdparty.example/data');
+    const headers = new dom.window.Headers({ 'X-App': 'v1' });
+    const init: RequestInit = {
+      method: 'GET',
+      headers: headers as unknown as HeadersInit,
+      credentials: 'include',
+    };
+    const promise = (
+      dom.window as unknown as { fetch: (u: URL, i?: RequestInit) => Promise<Response> }
+    ).fetch(url as unknown as URL, init);
+
+    const routed = posted.find((m) => m.type === 'SOLID_FETCH_REQUEST');
+    const requestId = routed?.requestId as string;
+    expect(nativeFetch).not.toHaveBeenCalled();
+
+    // MUTATE the caller's objects after the call but BEFORE the sentinel arrives.
+    url.pathname = '/HIJACKED';
+    headers.set('X-App', 'TAMPERED');
+    headers.set('X-Injected', 'yes');
+    init.credentials = 'omit';
+
+    deliverToPage({ type: 'SOLID_FETCH_RESPONSE', requestId, passthrough: true });
+    await promise;
+
+    // PRISTINE_FETCH saw the values AS THEY WERE AT CALL TIME, not the mutated ones.
+    const [calledInput, calledInit] = nativeFetch.mock.calls[0] as [
+      string | URL,
+      RequestInit | undefined,
+    ];
+    expect(calledInput.toString()).toBe('https://api.thirdparty.example/data');
+    expect(new Headers(calledInit?.headers).get('X-App')).toBe('v1');
+    expect(new Headers(calledInit?.headers).has('X-Injected')).toBe(false);
+    expect(calledInit?.credentials).toBe('include');
   });
 
   it('a passthrough sentinel that REJECTS (CORS block) rejects the page promise exactly as native', async () => {

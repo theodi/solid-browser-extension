@@ -289,6 +289,38 @@ describe('service-worker per-requesting-origin gate (wired)', () => {
     expect(fetchCalls.some((c) => c.url.startsWith('https://tracker.example'))).toBe(false);
   });
 
+  it('DENIES a PRESENT-but-OPAQUE sender.origin ("null") with a normal https sender.url — NO egress (High #1)', async () => {
+    // The High #1 exploit wired through the SW: an opaque/sandboxed frame whose sender.origin is
+    // the string "null" but whose sender.url is a normal https URL that matches the stamp. The
+    // old fail-open would have laundered it into the granted origin and served credentials.
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://app.example']);
+    await loadWorker();
+
+    const res = await sendFetch(
+      { url: 'https://alice.pod.example/private/notes.ttl', stampedOrigin: 'https://app.example' },
+      { origin: 'null', url: 'https://app.example/page.html' },
+    );
+
+    expect(res.status).toBe(403);
+    expect(res.error).toBe('Forbidden origin');
+    expect(fetchCalls.some((c) => c.url.startsWith('https://alice.pod.example'))).toBe(false);
+  });
+
+  it('STILL allows a sender with ABSENT origin but a valid https url + matching stamp (legit fallback)', async () => {
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://app.example']);
+    await loadWorker();
+
+    const res = await sendFetch(
+      { url: 'https://alice.pod.example/private/notes.ttl', stampedOrigin: 'https://app.example' },
+      { url: 'https://app.example/page.html' }, // no origin field → ABSENT → derive from url
+    );
+
+    expect(res.status).toBe(200);
+    expect(fetchCalls.some((c) => c.url.startsWith('https://alice.pod.example'))).toBe(true);
+  });
+
   it('returns "Not authenticated" with NO gate egress when there is no session', async () => {
     // No session seeded.
     await loadWorker();
@@ -301,12 +333,15 @@ describe('service-worker per-requesting-origin gate (wired)', () => {
   });
 });
 
-describe('login GRANTS the requesting origin (the opt-in)', () => {
-  it('persists the verified origin to the grant store on a page-driven login', async () => {
-    // We do not exercise the real OIDC flow (it needs the IdP); we assert the grant write,
-    // which runs BEFORE initiateLogin. A login failure still leaves the grant recorded.
+describe('login GRANTS the requesting origin ONLY on success (privilege-escalation guard)', () => {
+  // High #2: the grant must be persisted ONLY AFTER a successful, owner-approved login — never
+  // before initiateLogin. In these tests the real OIDC flow has no IdP, so initiateLogin THROWS;
+  // therefore a SOLID_LOGIN here represents a CANCELLED/FAILED login and must leave the grant
+  // store UNCHANGED. The success path is covered separately by mocking initiateLogin.
+
+  it('does NOT grant the requesting origin when initiateLogin fails/cancels', async () => {
     await loadWorker();
-    await sendMessage(
+    const res = await sendMessage(
       {
         type: 'SOLID_LOGIN',
         webId: 'https://alice.pod.example/card#me',
@@ -314,12 +349,118 @@ describe('login GRANTS the requesting origin (the opt-in)', () => {
       },
       { origin: 'https://newapp.example', url: 'https://newapp.example/x' },
     );
+    // The login failed (no IdP) ...
+    expect(res.error).toBeDefined();
+    // ... so NO grant was persisted (the privilege-escalation fix).
     const grants = (storage.get('solid:granted-origins') as string[]) ?? [];
-    expect(grants).toContain('https://newapp.example');
+    expect(grants).not.toContain('https://newapp.example');
   });
 
-  it('does NOT grant a FORGED login origin (sender ≠ stamp)', async () => {
+  it('a FAILED/CANCELLED login leaves the grant store UNCHANGED and a later fetch from that origin is DENIED even when a session EXISTS', async () => {
+    // The attack High #2 closes: a session already exists for the user; a hostile page sends
+    // SOLID_LOGIN (which it cancels/fails), then tries SOLID_FETCH_REQUEST to ride the existing
+    // credentials. The cancelled login must NOT have granted the page.
+    await seedSession(); // a live session already exists
+    // No grant for the hostile origin.
     await loadWorker();
+
+    // Step 1: the hostile page drives a login that fails (no IdP).
+    const loginRes = await sendMessage(
+      {
+        type: 'SOLID_LOGIN',
+        webId: 'https://alice.pod.example/card#me',
+        origin: 'https://hostile.example',
+      },
+      { origin: 'https://hostile.example', url: 'https://hostile.example/x' },
+    );
+    expect(loginRes.error).toBeDefined();
+    const grants = (storage.get('solid:granted-origins') as string[]) ?? [];
+    expect(grants).not.toContain('https://hostile.example');
+
+    // The failing OIDC flow itself may make network calls (discovery/profile) on the raw fetch;
+    // those are NOT the gated egress we're asserting about. Reset the captured calls so the next
+    // assertion concerns ONLY the credential-attaching SOLID_FETCH_REQUEST egress.
+    fetchCalls.length = 0;
+
+    // Step 2: the hostile page now tries to read the existing session's pod. DENIED — no grant,
+    // so NO credential-attaching egress to the pod from the gated fetch path.
+    const fetchRes = await sendFetch(
+      {
+        url: 'https://alice.pod.example/private/notes.ttl',
+        stampedOrigin: 'https://hostile.example',
+      },
+      { origin: 'https://hostile.example', url: 'https://hostile.example/x' },
+    );
+    expect(fetchRes.status).toBe(403);
+    expect(fetchRes.error).toBe('Origin not granted access');
+    expect(fetchCalls.some((c) => c.url.startsWith('https://alice.pod.example'))).toBe(false);
+  });
+
+  it('a SUCCESSFUL login GRANTS the verified origin and a subsequent fetch SUCCEEDS', async () => {
+    // Mock initiateLogin to succeed, returning a fresh session, so we exercise the success path
+    // where the grant SHOULD now be persisted.
+    const keyPair = await generateDpopKeyPair();
+    const exported = await exportDpopKeyPair(keyPair);
+    const session: StoredSession = {
+      webId: 'https://alice.pod.example/profile/card#me',
+      accessToken: 'access-token-xyz',
+      refreshToken: 'refresh-xyz',
+      dpopKeyPair: exported,
+      issuer: 'https://idp.example/',
+      tokenEndpoint: 'https://idp.example/token',
+      clientId: 'https://newapp.example/clientid.jsonld',
+      expiresAt: Date.now() + 60 * 60 * 1000,
+    };
+    vi.doMock('../src/background/auth-flow', () => ({
+      initiateLogin: vi.fn(async () => ({ session, name: 'Alice', photoUrl: null })),
+      refreshSession: vi.fn(async (s: StoredSession) => s),
+    }));
+    await loadWorker();
+
+    const loginRes = await sendMessage(
+      {
+        type: 'SOLID_LOGIN',
+        webId: 'https://alice.pod.example/card#me',
+        origin: 'https://newapp.example',
+      },
+      { origin: 'https://newapp.example', url: 'https://newapp.example/x' },
+    );
+    expect(loginRes.ok).toBe(true);
+    const grants = (storage.get('solid:granted-origins') as string[]) ?? [];
+    expect(grants).toContain('https://newapp.example');
+
+    // The now-granted origin can read its pod.
+    const fetchRes = await sendFetch(
+      {
+        url: 'https://alice.pod.example/private/notes.ttl',
+        stampedOrigin: 'https://newapp.example',
+      },
+      { origin: 'https://newapp.example', url: 'https://newapp.example/app.html' },
+    );
+    expect(fetchRes.status).toBe(200);
+    expect(fetchCalls.some((c) => c.url.startsWith('https://alice.pod.example'))).toBe(true);
+    vi.doUnmock('../src/background/auth-flow');
+  });
+
+  it('does NOT grant a FORGED login origin even on success (sender ≠ stamp)', async () => {
+    const keyPair = await generateDpopKeyPair();
+    const exported = await exportDpopKeyPair(keyPair);
+    const session: StoredSession = {
+      webId: 'https://alice.pod.example/profile/card#me',
+      accessToken: 'access-token-xyz',
+      refreshToken: 'refresh-xyz',
+      dpopKeyPair: exported,
+      issuer: 'https://idp.example/',
+      tokenEndpoint: 'https://idp.example/token',
+      clientId: 'https://newapp.example/clientid.jsonld',
+      expiresAt: Date.now() + 60 * 60 * 1000,
+    };
+    vi.doMock('../src/background/auth-flow', () => ({
+      initiateLogin: vi.fn(async () => ({ session, name: 'Alice', photoUrl: null })),
+      refreshSession: vi.fn(async (s: StoredSession) => s),
+    }));
+    await loadWorker();
+
     await sendMessage(
       {
         type: 'SOLID_LOGIN',
@@ -329,8 +470,10 @@ describe('login GRANTS the requesting origin (the opt-in)', () => {
       { origin: 'https://attacker.example', url: 'https://attacker.example/x' }, // real sender
     );
     const grants = (storage.get('solid:granted-origins') as string[]) ?? [];
+    // The forged origin resolves to null → no grant for victim OR attacker, even on success.
     expect(grants).not.toContain('https://victim.example');
     expect(grants).not.toContain('https://attacker.example');
+    vi.doUnmock('../src/background/auth-flow');
   });
 });
 

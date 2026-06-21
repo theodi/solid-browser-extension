@@ -36,10 +36,31 @@ function originOf(value: string | null | undefined): string | null {
     // `javascript:`); a sandboxed `srcdoc` frame reports "null" too (which then throws here).
     // Treat the opaque sentinel as no-origin (fail-closed), never a shared bucket.
     if (o === 'null' || o === '') return null;
+    // Only http(s) origins are usable requester anchors. A non-http(s) scheme (e.g. `ftp:`,
+    // `ws:`, a custom protocol) is treated as no-origin (fail-closed) so it can never be a
+    // trusted requester.
+    if (!o.startsWith('https://') && !o.startsWith('http://')) return null;
     return o;
   } catch {
     return null;
   }
+}
+
+/**
+ * Distinguish a sender.origin that is genuinely ABSENT (undefined / null / empty string — Chrome
+ * omits `origin` for some sender types) from one that is PRESENT-but-OPAQUE. Chrome sets
+ * `sender.origin` to the literal string `"null"` for sandboxed / opaque frames; a present opaque
+ * value must DENY immediately (never fall back to `sender.url`), so that an opaque sender with a
+ * normal http(s) `sender.url` cannot be laundered into a trusted origin. Absent → caller may
+ * derive from `sender.url`.
+ *
+ * Returns `'absent'`, `'opaque'`, or the resolved (usable, http(s)) origin string.
+ */
+function classifySenderOrigin(origin: string | null | undefined): 'absent' | 'opaque' | string {
+  if (origin === undefined || origin === null || origin === '') return 'absent';
+  const resolved = originOf(origin);
+  if (resolved === null) return 'opaque'; // present but opaque / unparseable / non-http(s) → DENY
+  return resolved;
 }
 
 /**
@@ -59,9 +80,13 @@ export interface MessageSender {
  * both agree on a usable (non-opaque) origin, else `null` (DENY).
  *
  * Authority order:
- *   1. The browser-attested origin is `sender.origin`, falling back to the origin OF
- *      `sender.url` (Chrome omits `origin` for some sender types but always has `url`).
- *      This value is set by the browser and cannot be forged by page JS.
+ *   1. The browser-attested origin is `sender.origin`. We fall back to the origin OF
+ *      `sender.url` ONLY when `sender.origin` is genuinely ABSENT (Chrome omits `origin` for
+ *      some sender types but always has `url`). If `sender.origin` is PRESENT and OPAQUE
+ *      (Chrome stamps the literal string `"null"` for sandboxed / opaque frames), we DENY
+ *      IMMEDIATELY and do NOT consult `sender.url` — otherwise an opaque sender with a normal
+ *      http(s) `sender.url` would be laundered into a trusted origin (the opaque-boundary
+ *      fail-OPEN). This value is set by the browser and cannot be forged by page JS.
  *   2. The page-supplied `stampedOrigin` is the value the content script read from
  *      `window.location.origin` and forwarded. It is advisory only.
  *   3. BOTH must resolve to the SAME non-opaque origin. Any mismatch, or either being
@@ -73,9 +98,14 @@ export function resolveRequestingOrigin(
   sender: MessageSender | null | undefined,
   stampedOrigin: string | null | undefined,
 ): string | null {
-  // Browser-attested origin: prefer sender.origin, else derive from sender.url.
-  const attested = originOf(sender?.origin) ?? originOf(sender?.url);
-  if (attested === null) return null; // opaque / missing attested origin → DENY.
+  // Browser-attested origin. CRITICAL fail-closed boundary: a PRESENT sender.origin is
+  // authoritative — if it is opaque ("null"/unparseable/non-http(s)) we DENY and must NOT fall
+  // back to sender.url (which could be a normal https URL for an opaque/sandboxed frame). Only a
+  // genuinely ABSENT sender.origin lets us derive the attested origin from sender.url.
+  const senderOriginClass = classifySenderOrigin(sender?.origin);
+  if (senderOriginClass === 'opaque') return null; // present but opaque → DENY, no url fallback.
+  const attested = senderOriginClass === 'absent' ? originOf(sender?.url) : senderOriginClass;
+  if (attested === null) return null; // absent origin AND no usable url → DENY.
 
   // The page-supplied stamp must be present and parse to a usable origin.
   const stamped = originOf(stampedOrigin);

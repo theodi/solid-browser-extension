@@ -303,12 +303,17 @@ async function handleLogin(
   sender: MessageSender | undefined,
 ): Promise<ActionResult> {
   try {
-    // A login driven FROM a web page is a deliberate owner opt-in: grant that app origin so
-    // its subsequent window.solid.fetch calls pass the per-origin gate. Verify the origin
-    // via the same dual-origin agreement (browser-attested ∧ page stamp) and never trust the
-    // page-supplied field alone. A popup/side-panel login has no web sender → nothing granted.
+    // A login driven FROM a web page is a deliberate owner opt-in. Resolve + REMEMBER the
+    // verified requesting origin now (to bind the flow), but do NOT grant it yet — verify the
+    // origin via the same dual-origin agreement (browser-attested ∧ page stamp) and never trust
+    // the page-supplied field alone. A popup/side-panel login has no web sender → nothing to grant.
+    //
+    // SECURITY (privilege-escalation guard): the grant is persisted ONLY AFTER initiateLogin
+    // succeeds (the success path below). Granting BEFORE login would let any page send
+    // SOLID_LOGIN, have its origin persisted as granted even if the auth flow is cancelled or
+    // fails, and then — if a session already existed — read the existing credentials via
+    // SOLID_FETCH_REQUEST. A failed/cancelled login must leave the grant store UNCHANGED.
     const requestingOrigin = resolveRequestingOrigin(sender, message.origin);
-    if (requestingOrigin !== null) await grantOrigin(requestingOrigin);
 
     const clientIds = await loadClientIds();
     const candidate =
@@ -322,6 +327,9 @@ async function handleLogin(
       webId: message.webId,
       clientId,
     });
+    // Login succeeded (owner-approved): NOW grant the verified requesting origin so its
+    // subsequent window.solid.fetch calls pass the per-origin gate.
+    if (requestingOrigin !== null) await grantOrigin(requestingOrigin);
     cachedSession = session;
     cachedKeyPair = null;
     await saveProfile({ webId: session.webId, name, photoUrl });
@@ -331,6 +339,7 @@ async function handleLogin(
     await broadcastStateChange(session.webId);
     return { ok: true, webId: session.webId };
   } catch (err) {
+    // A cancelled / failed login persists NO grant — the grant store is untouched above.
     return { error: err instanceof Error ? err.message : 'Login failed' };
   }
 }

@@ -112,6 +112,91 @@ describe('resolveRequestingOrigin — dual-origin agreement', () => {
   });
 });
 
+describe('resolveRequestingOrigin — PRESENT-but-OPAQUE sender.origin must NOT fall back to sender.url (High #1)', () => {
+  // THE BUG (High #1): Chrome sets sender.origin to the literal string "null" for an opaque /
+  // sandboxed frame. The old code fell back to sender.url whenever sender.origin was falsy OR
+  // opaque, so an opaque sender with a NORMAL https sender.url + a matching stamp was laundered
+  // into a TRUSTED origin — a fail-OPEN of the opaque boundary. The fix: a PRESENT opaque
+  // sender.origin DENIES immediately and never consults sender.url.
+
+  it('DENIES sender.origin === "null" (string) even with a valid https sender.url + matching stamp', () => {
+    // The exploit: opaque sender, but a believable https url + stamp that agree.
+    expect(
+      resolveRequestingOrigin(
+        { origin: 'null', url: 'https://app.example/page.html' },
+        'https://app.example',
+      ),
+    ).toBeNull();
+  });
+
+  it('DENIES an opaque sender.origin even when sender.url, stamp AND the url-origin all agree', () => {
+    // Belt-and-braces: every page-controllable signal points at a real origin, but the
+    // browser-attested sender.origin is opaque → DENY, no url fallback.
+    expect(
+      resolveRequestingOrigin(
+        { origin: 'null', url: 'https://victim.example/' },
+        'https://victim.example',
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ['data:', 'data:text/html,<x>'],
+    ['about:blank', 'about:blank'],
+    ['file:', 'file:///etc/passwd'],
+    ['javascript:', 'javascript:alert(1)'],
+    ['unparseable garbage', 'not a url at all'],
+    ['non-http scheme ftp:', 'ftp://app.example/'],
+    ['non-http scheme ws:', 'ws://app.example/'],
+  ])('DENIES a PRESENT but opaque/unparseable/non-http(s) sender.origin (%s) with a valid https url', (_label, opaqueOrigin) => {
+    expect(
+      resolveRequestingOrigin(
+        { origin: opaqueOrigin, url: 'https://app.example/page.html' },
+        'https://app.example',
+      ),
+    ).toBeNull();
+  });
+
+  it('STILL resolves when sender.origin is genuinely ABSENT and sender.url + stamp agree (legit fallback preserved)', () => {
+    // undefined origin → derive from url (the legitimate Chrome-omits-origin case).
+    expect(
+      resolveRequestingOrigin({ url: 'https://app.example/page.html?x=1' }, 'https://app.example'),
+    ).toBe('https://app.example');
+  });
+
+  it.each([
+    ['undefined origin', undefined],
+    ['null origin', null],
+    ['empty-string origin', ''],
+  ])('treats %s as ABSENT → derives from sender.url (legit fallback preserved)', (_label, origin) => {
+    expect(
+      resolveRequestingOrigin(
+        { origin: origin as string | undefined, url: 'https://app.example/p.html' },
+        'https://app.example',
+      ),
+    ).toBe('https://app.example');
+  });
+
+  it('a PRESENT real https sender.origin is used as the authority (the normal case) and ignores a divergent url', () => {
+    // sender.origin present and real: it is authoritative; sender.url is NOT consulted, so even a
+    // divergent url cannot widen access — agreement is checked against sender.origin + stamp.
+    expect(
+      resolveRequestingOrigin(
+        { origin: 'https://app.example', url: 'https://elsewhere.example/x' },
+        'https://app.example',
+      ),
+    ).toBe('https://app.example');
+  });
+
+  it('the blob:-resolves-to-creator-origin case still works (sender.origin absent, blob url)', () => {
+    // A blob: URL is NOT opaque — it carries its creator origin, which the browser fixes. With
+    // sender.origin absent, the fallback derives the creator origin from the blob url.
+    expect(
+      resolveRequestingOrigin({ url: 'blob:https://app.example/uuid' }, 'https://app.example'),
+    ).toBe('https://app.example');
+  });
+});
+
 describe('isRequestingOriginGranted — default-deny', () => {
   const granted = new Set(['https://app.example', 'https://alice.pod.example']);
 

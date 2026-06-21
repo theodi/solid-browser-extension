@@ -25,6 +25,7 @@ const KEYS = {
   recentAccounts: 'solid:recent-accounts',
   clientIds: 'solid:client-ids',
   podOrigins: 'solid:pod-origins',
+  grantedOrigins: 'solid:granted-origins',
   authParams: 'solid:auth-params',
 } as const;
 
@@ -126,6 +127,48 @@ export async function loadPodOrigins(): Promise<string[]> {
 
 export async function savePodOrigins(origins: string[]): Promise<void> {
   await set(KEYS.podOrigins, origins);
+}
+
+// --- Granted requesting origins (the per-REQUESTING-origin access gate) ----------------
+//
+// The set of APP origins the owner has authorised to drive `window.solid.fetch`. This is
+// the Phase-0 grant store: default-deny means an origin not in this set (and not a
+// credential/pod origin) cannot read or write the pod through the extension. The owner
+// opts an app in by a deliberate, browser-attested action FROM that app's origin (login /
+// setClientId); the extension's own popup/side-panel flows do not add a web origin.
+//
+// NOTE: this store holds only origin strings (no credential). It is the single-user
+// owner-only grant model; the per-data-class grant store (tt6) is a later phase.
+
+/** The app origins explicitly granted access (most-recent-first not required; a set). */
+export async function loadGrantedOrigins(): Promise<string[]> {
+  return (await get<string[]>(KEYS.grantedOrigins)) ?? [];
+}
+
+/**
+ * Grant an app origin access (idempotent). Only a well-formed http(s) origin is stored;
+ * an opaque/invalid value is ignored (fail-closed — we never persist a "null" grant).
+ */
+export async function grantOrigin(origin: string): Promise<void> {
+  let canonical: string;
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return;
+    canonical = u.origin;
+    if (canonical === 'null' || canonical === '') return;
+  } catch {
+    return;
+  }
+  const list = await loadGrantedOrigins();
+  if (list.includes(canonical)) return;
+  await set(KEYS.grantedOrigins, [...list, canonical]);
+}
+
+/** Revoke an app origin's access. */
+export async function revokeOrigin(origin: string): Promise<void> {
+  const list = await loadGrantedOrigins();
+  const next = list.filter((o) => o !== origin);
+  if (next.length !== list.length) await set(KEYS.grantedOrigins, next);
 }
 
 // --- Transient auth params (PKCE/state across the redirect) ----------------------------

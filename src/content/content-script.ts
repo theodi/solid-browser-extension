@@ -45,6 +45,10 @@ window.addEventListener('message', (event) => {
           method: data.method,
           headers: data.headers ?? {},
           body: data.body ?? null,
+          // Stamp the REAL page origin (read HERE in the ISOLATED world, not page-supplied)
+          // so the worker's per-requesting-origin gate can cross-check it against the
+          // browser-attested sender.origin. The worker trusts the browser value, not this.
+          stampedOrigin: window.location.origin,
         },
         (response) => {
           toPage({ type: 'SOLID_FETCH_RESPONSE', ...(response ?? { error: 'No response' }) });
@@ -53,9 +57,12 @@ window.addEventListener('message', (event) => {
       break;
 
     case 'SOLID_GET_STATE':
-      chrome.runtime.sendMessage({ type: 'SOLID_GET_STATE' }, (response) => {
-        toPage({ type: 'SOLID_STATE_UPDATE', webId: response?.webId ?? null });
-      });
+      chrome.runtime.sendMessage(
+        { type: 'SOLID_GET_STATE', stampedOrigin: window.location.origin },
+        (response) => {
+          toPage({ type: 'SOLID_STATE_UPDATE', webId: response?.webId ?? null });
+        },
+      );
       break;
 
     case 'SOLID_SET_CLIENT_ID':

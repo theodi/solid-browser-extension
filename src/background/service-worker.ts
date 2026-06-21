@@ -22,6 +22,7 @@ import type {
   ActionResult,
   FetchRequest,
   FetchResponse,
+  GetStateRequest,
   LoginRequest,
   SessionState,
   SetClientIdRequest,
@@ -32,13 +33,22 @@ import { initiateLogin, refreshSession } from './auth-flow';
 import { authenticatedFetch, type FetchSession } from './core/authenticated-fetch';
 import { importDpopKeyPair } from './core/dpop';
 import { computeAllowedOrigins, isValidClientIdUrl } from './core/origin-policy';
+import {
+  computeGrantedOrigins,
+  decideRequestingOrigin,
+  isRequestingOriginGranted,
+  type MessageSender,
+  resolveRequestingOrigin,
+} from './core/requesting-origin';
 import { filterResponseHeaders } from './core/response-headers';
 import { SingleFlight } from './core/single-flight';
 import { parseWebIdProfile } from './core/webid';
 import {
   clearProfile,
   clearSession,
+  grantOrigin,
   loadClientIds,
+  loadGrantedOrigins,
   loadPodOrigins,
   loadProfile,
   loadRecentAccounts,
@@ -135,12 +145,83 @@ function originOf(url: string): string | null {
   }
 }
 
-async function handleFetch(message: FetchRequest): Promise<FetchResponse> {
+const DENY_MESSAGE = {
+  'forbidden-origin': 'Forbidden origin',
+  'origin-not-granted': 'Origin not granted access',
+  'cross-origin-foreign': 'Cross-origin fetch denied',
+} as const;
+
+/**
+ * The grant + foreign-fetch half of the per-requesting-origin gate, run BEFORE any pod
+ * egress or cache read (the dual-origin/opaque half already ran in {@link handleFetch}). It
+ * re-reads the grant store and re-runs the FULL decision (idempotent on the same inputs) so
+ * the single audited `decideRequestingOrigin` is the one boundary. Fail-closed on DENY.
+ *
+ * NOTE: the per-origin gate is applied to EVERY fetch up-front. Once a shared replica /
+ * cache exists (Phase 1) this same gate must be the first check on a cache hit too — it is
+ * deliberately separated here so a future cached-response path cannot bypass it.
+ */
+async function gateRequestingOrigin(
+  message: FetchRequest,
+  requestingOrigin: string,
+  sender: MessageSender | undefined,
+  allowedTargetOrigins: ReadonlySet<string>,
+): Promise<{ requestingOrigin: string } | { error: FetchResponse }> {
+  // The grant set is re-read from durable storage on EVERY request (no load-bearing
+  // in-memory gate state), so a cold SW wake is fail-CLOSED: if nothing has loaded yet the
+  // grant set is empty and every origin is denied — never a serve-while-loading window.
+  const explicitGrants = await loadGrantedOrigins();
+  const decision = decideRequestingOrigin(sender, message.stampedOrigin, message.url, {
+    explicitGrants,
+    credentialOrigins: allowedTargetOrigins,
+  });
+  // Defence-in-depth: the re-resolved origin must match the one resolved earlier in this
+  // request (it always will for identical inputs); a divergence is treated as DENY.
+  if (decision.deny !== null || decision.requestingOrigin !== requestingOrigin) {
+    return {
+      error: {
+        requestId: message.requestId,
+        status: 403,
+        error: decision.deny ? DENY_MESSAGE[decision.deny] : DENY_MESSAGE['forbidden-origin'],
+      },
+    };
+  }
+  return { requestingOrigin: decision.requestingOrigin };
+}
+
+async function handleFetch(
+  message: FetchRequest,
+  sender: MessageSender | undefined,
+): Promise<FetchResponse> {
+  // FIRST, before ANY session work (which may trigger a token refresh): the cheap,
+  // session-independent half of the gate — dual-origin agreement + opaque/null rejection. A
+  // forged/opaque origin is denied here so it cannot even cause a session-refresh side
+  // effect (refresh-token amplification). The browser-attested sender is the authority.
+  const requestingOrigin = resolveRequestingOrigin(sender, message.stampedOrigin);
+  if (requestingOrigin === null) {
+    return {
+      requestId: message.requestId,
+      status: 403,
+      error: DENY_MESSAGE['forbidden-origin'],
+    };
+  }
+
   const ctx = await ensureSession();
   if (!ctx) return { requestId: message.requestId, error: 'Not authenticated' };
 
   try {
     const fetchSession = await buildFetchSession(ctx.session, ctx.keyPair);
+
+    // THEN the grant + foreign-fetch half (needs the session's credential origins): the
+    // per-requesting-origin default-deny gate, BEFORE any pod egress or cache read.
+    const gate = await gateRequestingOrigin(
+      message,
+      requestingOrigin,
+      sender,
+      fetchSession.allowedOrigins,
+    );
+    if ('error' in gate) return gate.error;
+
     const origin = originOf(message.url);
     const result = await authenticatedFetch(fetchSession, {
       url: message.url,
@@ -182,20 +263,53 @@ async function refreshProfile(webId: string): Promise<void> {
   }
 }
 
-function broadcastStateChange(webId: string | null): void {
-  chrome.tabs.query({}, (tabs) => {
-    for (const tab of tabs) {
-      if (tab.id !== undefined) {
-        chrome.tabs.sendMessage(tab.id, { type: 'SOLID_STATE_CHANGED', webId }).catch(() => {});
-      }
+/**
+ * Broadcast an auth-state change. The WebID (PII) is sent to a tab ONLY when that tab's
+ * origin holds a grant — a non-granted page is told the WebID is `null` (it learns nothing
+ * about who is signed in), closing the design §4.3 PII-broadcast over-exposure. A logout
+ * (`webId === null`) is sent to every tab so granted apps clear their state. The popup/side
+ * panel (extension contexts) always get the real value via the runtime broadcast.
+ */
+async function broadcastStateChange(webId: string | null): Promise<void> {
+  let granted: ReadonlySet<string> = new Set();
+  if (webId !== null) {
+    const ctx = await ensureSession();
+    if (ctx) {
+      const explicitGrants = await loadGrantedOrigins();
+      granted = computeGrantedOrigins({
+        explicitGrants,
+        credentialOrigins: await sessionCredentialOrigins(ctx.session, ctx.keyPair),
+      });
     }
-  });
-  // Also notify the popup if open (runtime broadcast).
+  }
+
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue;
+    const tabOrigin = tab.url ? originOf(tab.url) : null;
+    // A signed-in WebID is only revealed to a granted tab; everyone else (and every tab on
+    // logout) gets null. Fail-closed: an unparseable tab URL never receives the WebID.
+    const tabWebId = webId !== null && tabOrigin !== null && granted.has(tabOrigin) ? webId : null;
+    chrome.tabs
+      .sendMessage(tab.id, { type: 'SOLID_STATE_CHANGED', webId: tabWebId })
+      .catch(() => {});
+  }
+  // The popup/side panel are trusted extension contexts — give them the real value.
   chrome.runtime.sendMessage({ type: 'SOLID_STATE_CHANGED', webId }).catch(() => {});
 }
 
-async function handleLogin(message: LoginRequest): Promise<ActionResult> {
+async function handleLogin(
+  message: LoginRequest,
+  sender: MessageSender | undefined,
+): Promise<ActionResult> {
   try {
+    // A login driven FROM a web page is a deliberate owner opt-in: grant that app origin so
+    // its subsequent window.solid.fetch calls pass the per-origin gate. Verify the origin
+    // via the same dual-origin agreement (browser-attested ∧ page stamp) and never trust the
+    // page-supplied field alone. A popup/side-panel login has no web sender → nothing granted.
+    const requestingOrigin = resolveRequestingOrigin(sender, message.origin);
+    if (requestingOrigin !== null) await grantOrigin(requestingOrigin);
+
     const clientIds = await loadClientIds();
     const candidate =
       message.clientId || (message.origin ? clientIds[message.origin] : undefined) || undefined;
@@ -214,27 +328,86 @@ async function handleLogin(message: LoginRequest): Promise<ActionResult> {
     await setSignedInIcon({ webId: session.webId, name, photoUrl });
     // best-effort fresher profile from the post-auth WebID (handles webid != input).
     void refreshProfile(session.webId);
-    broadcastStateChange(session.webId);
+    await broadcastStateChange(session.webId);
     return { ok: true, webId: session.webId };
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Login failed' };
   }
 }
 
-async function handleGetState(): Promise<SessionState> {
+/**
+ * Whether a message sender is one of the extension's OWN trusted contexts (popup, side
+ * panel, options) rather than a web page. Chrome stamps these with the extension's own
+ * origin/URL; a web content script is stamped with the page origin. The owner UI is fully
+ * trusted; a web page is not. Fail-closed: an unknown/opaque sender is treated as NOT the
+ * extension (a web page), so it gets the scoped (PII-free) view.
+ */
+function isExtensionContext(sender: MessageSender | undefined): boolean {
+  const extensionOrigin = `chrome-extension://${chrome.runtime.id}`;
+  if (sender?.origin && sender.origin === extensionOrigin) return true;
+  if (sender?.url?.startsWith(`${extensionOrigin}/`)) return true;
+  return false;
+}
+
+/**
+ * Answer `SOLID_GET_STATE`. The extension's OWN contexts (popup/side panel) get the full
+ * session view. A WEB PAGE gets identity (WebID + profile) ONLY if its verified+granted
+ * origin holds a grant — otherwise the PII is withheld (design §4.3 "PII broadcast"): a page
+ * the owner never opted in learns nothing about who is signed in.
+ */
+async function handleGetState(
+  message: GetStateRequest,
+  sender: MessageSender | undefined,
+): Promise<SessionState> {
   const ctx = await ensureSession();
   const profile = await loadProfile();
-  const recentAccounts = await loadRecentAccounts();
+
+  if (isExtensionContext(sender)) {
+    const recentAccounts = await loadRecentAccounts();
+    return {
+      webId: ctx?.session.webId ?? null,
+      isActive: ctx !== null,
+      name: profile?.name ?? null,
+      photoUrl: profile?.photoUrl ?? null,
+      recentAccounts,
+    };
+  }
+
+  // Web page: scope identity exposure to opt-in/granted origins only.
+  const requestingOrigin = resolveRequestingOrigin(sender, message.stampedOrigin);
+  let mayExpose = false;
+  if (requestingOrigin !== null && ctx) {
+    const explicitGrants = await loadGrantedOrigins();
+    const granted = computeGrantedOrigins({
+      explicitGrants,
+      credentialOrigins: await sessionCredentialOrigins(ctx.session, ctx.keyPair),
+    });
+    mayExpose = isRequestingOriginGranted(granted, requestingOrigin);
+  }
+
   return {
-    webId: ctx?.session.webId ?? null,
-    isActive: ctx !== null,
-    name: profile?.name ?? null,
-    photoUrl: profile?.photoUrl ?? null,
-    recentAccounts,
+    webId: mayExpose ? (ctx?.session.webId ?? null) : null,
+    isActive: mayExpose && ctx !== null,
+    name: mayExpose ? (profile?.name ?? null) : null,
+    photoUrl: mayExpose ? (profile?.photoUrl ?? null) : null,
+    // Never leak the cross-pod recent-accounts list to a web page.
+    recentAccounts: [],
   };
 }
 
-async function handleSetClientId(message: SetClientIdRequest): Promise<ActionResult> {
+/** The session's credential (pod/WebID/issuer) origins — the auto-granted requester set. */
+async function sessionCredentialOrigins(
+  session: StoredSession,
+  keyPair: CryptoKeyPair,
+): Promise<ReadonlySet<string>> {
+  const fetchSession = await buildFetchSession(session, keyPair);
+  return fetchSession.allowedOrigins;
+}
+
+async function handleSetClientId(
+  message: SetClientIdRequest,
+  sender: MessageSender | undefined,
+): Promise<ActionResult> {
   try {
     // A Client Identifier Document is a dereferenceable URL. Require HTTPS so it cannot be
     // tampered with in transit; allow http: ONLY for a loopback host (dev CSS). A remote
@@ -242,7 +415,16 @@ async function handleSetClientId(message: SetClientIdRequest): Promise<ActionRes
     if (!isValidClientIdUrl(message.clientId)) {
       throw new Error('Client identifier must be an https: URL (http: allowed for loopback only).');
     }
-    await saveClientId(message.origin, message.clientId);
+    // Cross-check the page-supplied origin against the browser-attested sender; store the
+    // client-id (and grant the app) only under the VERIFIED origin, so a renderer cannot
+    // map another origin's client-id or self-grant a foreign origin.
+    const requestingOrigin = resolveRequestingOrigin(sender, message.origin);
+    if (requestingOrigin === null) {
+      throw new Error('Could not verify the requesting origin.');
+    }
+    await saveClientId(requestingOrigin, message.clientId);
+    // Declaring a client-id is a deliberate owner opt-in from this app → grant it access.
+    await grantOrigin(requestingOrigin);
     return { ok: true };
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Invalid client identifier' };
@@ -250,27 +432,27 @@ async function handleSetClientId(message: SetClientIdRequest): Promise<ActionRes
 }
 
 chrome.runtime.onMessage.addListener(
-  (message: WorkerRequest, _sender, sendResponse: (r: unknown) => void) => {
+  (message: WorkerRequest, sender, sendResponse: (r: unknown) => void) => {
     switch (message.type) {
       case 'SOLID_FETCH_REQUEST':
-        handleFetch(message).then(sendResponse);
+        // Pass the browser-ATTESTED sender (origin/url set by Chrome, not the page) so the
+        // per-requesting-origin gate can cross-check it against the page-supplied stamp.
+        handleFetch(message, sender).then(sendResponse);
         return true;
       case 'SOLID_LOGIN':
-        handleLogin(message).then(sendResponse);
+        handleLogin(message, sender).then(sendResponse);
         return true;
       case 'SOLID_LOGOUT':
         teardownSession()
-          .then(() => {
-            broadcastStateChange(null);
-            sendResponse({ ok: true });
-          })
+          .then(() => broadcastStateChange(null))
+          .then(() => sendResponse({ ok: true }))
           .catch((err) => sendResponse({ error: String(err) }));
         return true;
       case 'SOLID_GET_STATE':
-        handleGetState().then(sendResponse);
+        handleGetState(message, sender).then(sendResponse);
         return true;
       case 'SOLID_SET_CLIENT_ID':
-        handleSetClientId(message).then(sendResponse);
+        handleSetClientId(message, sender).then(sendResponse);
         return true;
       default:
         return false;
@@ -298,7 +480,7 @@ ensureSession().then(async (ctx) => {
       name: profile?.name ?? null,
       photoUrl: profile?.photoUrl ?? null,
     });
-    broadcastStateChange(ctx.session.webId);
+    await broadcastStateChange(ctx.session.webId);
   } else {
     await setSignedOutIcon();
   }

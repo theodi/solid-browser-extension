@@ -22,6 +22,13 @@ export interface FetchRequest {
   readonly method: string;
   readonly headers: Record<string, string>;
   readonly body: string | null;
+  /**
+   * The page-supplied requesting origin (`window.location.origin`), stamped by the content
+   * script. ADVISORY ONLY — the worker cross-checks it against the browser-attested
+   * `sender.origin` and trusts the browser value. A mismatch is denied; this is never the
+   * sole authority. (Per design §4.3 "Forge the access-control anchor".)
+   */
+  readonly stampedOrigin?: string;
 }
 
 export interface LoginRequest {
@@ -39,6 +46,12 @@ export interface LogoutRequest {
 
 export interface GetStateRequest {
   readonly type: 'SOLID_GET_STATE';
+  /**
+   * The page-supplied requesting origin, stamped by the content script. ADVISORY ONLY —
+   * cross-checked against the browser-attested `sender` so the worker only exposes the WebID
+   * (PII) to a verified, granted page origin. Absent for the extension's own contexts.
+   */
+  readonly stampedOrigin?: string;
 }
 
 export interface SetClientIdRequest {

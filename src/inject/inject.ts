@@ -54,6 +54,18 @@ interface SolidExtension {
 
 type Pending<T> = { resolve: (v: T) => void; reject: (e: Error) => void };
 
+/**
+ * A pending `solidFetch`, plus the ORIGINAL `input`/`init` it was called with. The original
+ * args are retained so that if the SW returns a PASSTHROUGH SENTINEL (round-2 High #1 — the SW
+ * declined an autoDivert request and did NO network), the page-side handler can complete the
+ * request by calling the page's OWN native fetch (PRISTINE_FETCH) with full CORS / credentials
+ * / header fidelity — the SW never fetches cross-origin bytes on a page's behalf.
+ */
+type PendingFetch = Pending<Response> & {
+  readonly input: RequestInfo | URL;
+  readonly init?: RequestInit;
+};
+
 // Install exactly once, even if inject.js runs twice (Medium #2). The marker covers a re-run
 // after our own install; the `'solid' in window` check covers a prior install from a different
 // code path. A double-run is then an inert no-op, NOT a throw on the `configurable:false`
@@ -64,7 +76,16 @@ if (!window.__solidInjected && !('solid' in window)) {
 }
 
 function installSolidInjection(): void {
-  const pendingFetches = new Map<string, Pending<Response>>();
+  // --- Snapshot the PRISTINE fetch FIRST (the @jeswr/solid-elements discipline) -----------
+  //
+  // Captured up-front, before the global patch below, so a later page script that overwrites
+  // `window.fetch` cannot poison it. This is ALSO the function the SW passthrough path falls
+  // back to: when the SW returns a passthrough sentinel, the page completes the request with
+  // its OWN native fetch in the page's origin context (round-2 High #1) — so the extension is
+  // never a cross-origin proxy and native CORS / credentials / header semantics are preserved.
+  const PRISTINE_FETCH = window.fetch.bind(window);
+
+  const pendingFetches = new Map<string, PendingFetch>();
   const pendingActions = new Map<string, Pending<void>>();
 
   let currentWebId: string | null = null;
@@ -79,7 +100,18 @@ function installSolidInjection(): void {
         const pending = pendingFetches.get(data.requestId);
         if (!pending) return;
         pendingFetches.delete(data.requestId);
-        if (data.error) {
+        if (data.passthrough === true) {
+          // PASSTHROUGH SENTINEL (round-2 High #1): the SW declined this autoDivert request and
+          // did NO network. Complete it with the page's OWN native fetch, in the page's origin
+          // context, using the ORIGINAL input/init — so CORS / credentials / headers behave
+          // EXACTLY as if the extension were not installed (if CORS blocks, this rejects /
+          // returns opaque exactly as native). We NEVER fabricate a Response from SW data on
+          // this path: the SW returned no bytes (it cannot be a cross-origin read proxy).
+          PRISTINE_FETCH(pending.input as RequestInfo, pending.init).then(
+            pending.resolve,
+            pending.reject,
+          );
+        } else if (data.error) {
           pending.reject(new Error(data.error));
         } else {
           pending.resolve(
@@ -122,7 +154,9 @@ function installSolidInjection(): void {
   ): Promise<Response> {
     return new Promise((resolve, reject) => {
       const requestId = crypto.randomUUID();
-      pendingFetches.set(requestId, { resolve, reject });
+      // Retain the ORIGINAL input/init so a passthrough sentinel can be completed with the
+      // page's own native fetch verbatim (round-2 High #1).
+      pendingFetches.set(requestId, { resolve, reject, input, init });
       let body: string | null = null;
       if (init?.body != null) {
         if (typeof init.body !== 'string') {
@@ -197,10 +231,11 @@ function installSolidInjection(): void {
   // NEVER widen access — it only forwards to the same gated `solid.fetch` path.
   //
   // Re-assert discipline (the @jeswr/solid-elements `installProactiveAuthFetch` pattern):
-  // snapshot the PRISTINE fetch FIRST, install once (idempotent), and never re-read a
-  // possibly-patched global. A later page script that overwrites `window.fetch` only affects
-  // ITS OWN requests — it gains no credential (the SW gate is the boundary).
-  const PRISTINE_FETCH = window.fetch.bind(window);
+  // snapshot the PRISTINE fetch FIRST (done at the TOP of installSolidInjection above, before
+  // any page script could overwrite `window.fetch`), install once (idempotent), and never
+  // re-read a possibly-patched global. A later page script that overwrites `window.fetch` only
+  // affects ITS OWN requests — it gains no credential (the SW gate is the boundary). The same
+  // PRISTINE_FETCH also services the SW passthrough sentinel (round-2 High #1).
 
   /**
    * A CHEAP page-side pre-filter for which requests are even WORTH routing to the SW — NOT the

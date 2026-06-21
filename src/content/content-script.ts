@@ -57,6 +57,10 @@ window.addEventListener('message', (event) => {
           stampedOrigin: window.location.origin,
         },
         (response) => {
+          // Relay the whole worker response verbatim, INCLUDING the `passthrough` sentinel
+          // flag (round-2 High #1): when the SW declines an autoDivert request without any
+          // network, `response.passthrough === true` rides through here so the MAIN-world
+          // inject can complete the request with the page's OWN native fetch (PRISTINE_FETCH).
           toPage({ type: 'SOLID_FETCH_RESPONSE', ...(response ?? { error: 'No response' }) });
         },
       );

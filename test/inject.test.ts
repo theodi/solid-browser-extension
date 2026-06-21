@@ -137,6 +137,104 @@ describe('inject — HIGH #1: the global-fetch patch marks routed requests autoD
   });
 });
 
+// --- Round-2 High #1: the page-side passthrough sentinel handler ------------------------
+//
+// When the SW returns `{ passthrough: true }` (it declined an autoDivert request and did NO
+// network), the inject MUST complete the pending promise by calling the page's OWN native fetch
+// (PRISTINE_FETCH) with the ORIGINAL input/init — never fabricate a Response from SW data.
+
+/** Deliver a `to-page` message into the inject's window 'message' listener. */
+function deliverToPage(message: Record<string, unknown>): void {
+  const win = dom.window as unknown as Window;
+  const event = new dom.window.MessageEvent('message', {
+    data: { channel: 'solid-browser-ext', dir: 'to-page', ...message },
+    source: win as unknown as MessageEventSource,
+  });
+  win.dispatchEvent(event);
+}
+
+describe('inject — Round-2 High #1: a passthrough sentinel is completed by the page native fetch', () => {
+  it('resolves a routed fetch by calling PRISTINE_FETCH with the ORIGINAL input + init, NOT a fabricated Response', async () => {
+    await importInject();
+    posted.length = 0;
+    // Make the native fetch return a distinctive body so we can prove the resolved Response came
+    // from PRISTINE_FETCH, not from any SW-supplied bytes.
+    nativeFetch.mockResolvedValueOnce(new Response('NATIVE-IN-PAGE-BYTES', { status: 207 }));
+
+    const init: RequestInit = { method: 'POST', headers: { 'X-App': 'v1' }, body: 'payload' };
+    const promise = (
+      dom.window as unknown as { fetch: (u: string, i?: RequestInit) => Promise<Response> }
+    ).fetch('https://api.thirdparty.example/data', init);
+
+    // The request was routed to the SW with autoDivert=true; nativeFetch not called YET.
+    const routed = posted.find((m) => m.type === 'SOLID_FETCH_REQUEST');
+    expect(routed).toBeDefined();
+    expect(routed?.autoDivert).toBe(true);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    const requestId = routed?.requestId as string;
+
+    // The SW replies with the passthrough SENTINEL (no body/status — it did no network).
+    deliverToPage({ type: 'SOLID_FETCH_RESPONSE', requestId, passthrough: true });
+
+    const response = await promise;
+    // The promise resolved with the PAGE's native fetch result (the SW gave no bytes).
+    expect(await response.text()).toBe('NATIVE-IN-PAGE-BYTES');
+    expect(response.status).toBe(207);
+    // PRISTINE_FETCH was called with the ORIGINAL input + init (CORS/creds/header fidelity).
+    expect(nativeFetch).toHaveBeenCalledTimes(1);
+    const [calledInput, calledInit] = nativeFetch.mock.calls[0];
+    expect(calledInput).toBe('https://api.thirdparty.example/data');
+    expect(calledInit).toBe(init);
+  });
+
+  it('a passthrough sentinel that REJECTS (CORS block) rejects the page promise exactly as native', async () => {
+    await importInject();
+    posted.length = 0;
+    const corsError = new TypeError('Failed to fetch');
+    nativeFetch.mockRejectedValueOnce(corsError);
+
+    const promise = (dom.window as unknown as { fetch: (u: string) => Promise<Response> }).fetch(
+      'https://blocked.example/data',
+    );
+    const routed = posted.find((m) => m.type === 'SOLID_FETCH_REQUEST');
+    const requestId = routed?.requestId as string;
+
+    deliverToPage({ type: 'SOLID_FETCH_RESPONSE', requestId, passthrough: true });
+
+    await expect(promise).rejects.toBe(corsError);
+  });
+
+  it('a NON-passthrough SW response (gated path) still resolves from SW data, never the native fetch', async () => {
+    await importInject();
+    posted.length = 0;
+    const solid = (
+      dom.window as unknown as {
+        solid: { fetch: (u: string) => Promise<Response> };
+      }
+    ).solid;
+    // Explicit window.solid.fetch → autoDivert=false → never a passthrough sentinel.
+    const promise = solid.fetch('https://alice.pod.example/private/notes.ttl');
+    const routed = posted.find((m) => m.type === 'SOLID_FETCH_REQUEST');
+    expect(routed?.autoDivert).toBe(false);
+    const requestId = routed?.requestId as string;
+
+    // The SW returns real (gated, authenticated) bytes — no passthrough flag.
+    deliverToPage({
+      type: 'SOLID_FETCH_RESPONSE',
+      requestId,
+      status: 200,
+      body: 'GATED-POD-BYTES',
+      headers: {},
+    });
+
+    const response = await promise;
+    expect(await response.text()).toBe('GATED-POD-BYTES');
+    expect(response.status).toBe(200);
+    // The native fetch was NOT used on the gated path.
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('inject — MEDIUM #2: a double injection is INERT (no throw on the second run)', () => {
   it('importing/running the inject TWICE does not throw and installs window.solid once', async () => {
     await importInject();

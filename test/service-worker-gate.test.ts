@@ -608,11 +608,12 @@ describe('SOLID_GET_STATE scopes the WebID (PII) to granted origins', () => {
   });
 });
 
-describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un-granted traffic', () => {
-  it('an autoDivert fetch to a NON-POD third party PASSES THROUGH as a plain native fetch (NOT a 403)', async () => {
-    // The page-compat regression: an app calls a third-party API/CDN. The global-fetch patch
-    // routes it (autoDivert=true). The SW gate denies (foreign target), but for an autoDivert
-    // request that must become a PLAIN UNAUTHENTICATED passthrough, not a 403 that breaks the app.
+describe('Round-2 HIGH #1: autoDivert returns a PASSTHROUGH SENTINEL — the SW does ZERO network (no cross-origin proxy)', () => {
+  it('an autoDivert fetch to a NON-POD third party → sentinel { passthrough:true }, NO SW fetch (NOT a 403, NO bytes)', async () => {
+    // The round-2 fix: an app calls a third-party API/CDN. The global-fetch patch routes it
+    // (autoDivert=true). The SW gate denies (foreign target). The SW must NOT fetch it itself
+    // (that would make the extension a cross-origin read proxy via its <all_urls> perms) — it
+    // returns a passthrough SENTINEL with no body/status, and the page completes it natively.
     await seedSession();
     storage.set('solid:granted-origins', ['https://pm.example']);
     fetchImpl = async () => new Response('third-party-json', { status: 200 });
@@ -627,21 +628,46 @@ describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un
       { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
     );
 
-    // The app's normal request SUCCEEDS (the extension is invisible to it).
-    expect(res.status).toBe(200);
-    expect(res.body).toBe('third-party-json');
+    // The SW returned ONLY the sentinel — no body, no status, no fetched bytes.
+    expect(res.passthrough).toBe(true);
+    expect(res.body).toBeUndefined();
+    expect(res.status).toBeUndefined();
     expect(res.error).toBeUndefined();
-    // The third party WAS reached — as a PLAIN fetch with NO credential attached.
-    const call = fetchCalls.find((c) => c.url.startsWith('https://api.thirdparty.example'));
-    expect(call).toBeDefined();
-    const headers = (call?.init?.headers as Record<string, string>) ?? {};
-    expect(headers.Authorization).toBeUndefined();
-    expect(headers.DPoP).toBeUndefined();
+    // CRITICAL (cross-origin-proxy hole closed): the SW performed NO fetch to the third party.
+    expect(fetchCalls.some((c) => c.url.startsWith('https://api.thirdparty.example'))).toBe(false);
   });
 
-  it('the SAME non-pod request WITHOUT autoDivert (explicit window.solid.fetch) DOES return 403', async () => {
+  it('SECURITY: a page CANNOT use the extension as a cross-origin read proxy — no autoDivert deny ever triggers an SW fetch', async () => {
+    // The exact round-2 exploit: a hostile page postMessages an autoDivert request for a
+    // cross-origin resource CORS would block. The SW must never fetch it and return its bytes.
+    await seedSession();
+    storage.set('solid:granted-origins', ['https://pm.example']);
+    // If the SW were to (wrongly) fetch, this is the secret cross-origin body it would leak.
+    fetchImpl = async () => new Response('SECRET-CROSS-ORIGIN-BYTES', { status: 200 });
+    await loadWorker();
+
+    const res = await sendFetch(
+      {
+        url: 'https://victim-bank.example/account/balance',
+        stampedOrigin: 'https://attacker.example',
+        autoDivert: true,
+      },
+      { origin: 'https://attacker.example', url: 'https://attacker.example/x' },
+    );
+
+    // The SW returns a sentinel ONLY — never the cross-origin bytes.
+    expect(res.passthrough).toBe(true);
+    expect(res.body).toBeUndefined();
+    expect(res.status).toBeUndefined();
+    // The SW made ZERO network calls to the victim origin — the proxy hole is closed.
+    expect(fetchCalls.some((c) => c.url.startsWith('https://victim-bank.example'))).toBe(false);
+    // And the secret bytes were never returned to the page anywhere in the response.
+    expect(JSON.stringify(res)).not.toContain('SECRET-CROSS-ORIGIN-BYTES');
+  });
+
+  it('the SAME non-pod request WITHOUT autoDivert (explicit window.solid.fetch) DOES return 403 (no sentinel)', async () => {
     // Contrast: an explicit window.solid.fetch deliberately asked for the gated path, so a
-    // foreign-target deny is the correct, expected 403 — only autoDivert softens to passthrough.
+    // foreign-target deny is the correct, expected 403 — only autoDivert gets a sentinel.
     await seedSession();
     storage.set('solid:granted-origins', ['https://pm.example']);
     await loadWorker();
@@ -653,12 +679,14 @@ describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un
 
     expect(res.status).toBe(403);
     expect(res.error).toBe('Cross-origin fetch denied');
+    expect(res.passthrough).toBeUndefined();
     expect(fetchCalls.some((c) => c.url.startsWith('https://api.thirdparty.example'))).toBe(false);
   });
 
-  it('an autoDivert POD read from an UN-GRANTED origin passes through UNAUTHENTICATED (no creds, no 403)', async () => {
-    // A non-granted app's global fetch hits the pod. Per the invariant it must not hard-fail; it
-    // gets a plain unauthenticated fetch (the pod returns its own 401/WAC), never the credential.
+  it('an autoDivert POD read from an UN-GRANTED origin → sentinel, NOT a 403 and NOT an SW fetch', async () => {
+    // A non-granted app's global fetch hits the pod. Per the invariant it must not hard-fail; the
+    // SW returns a sentinel (NO network, NO credential) and the page does the plain native fetch
+    // (the pod returns its own 401/WAC). The SW must NOT itself fetch the pod here.
     await seedSession();
     storage.set('solid:granted-origins', ['https://pm.example']); // ungranted.example is NOT granted
     fetchImpl = async () => new Response('pod-public-or-401', { status: 401 });
@@ -673,17 +701,14 @@ describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un
       { origin: 'https://ungranted.example', url: 'https://ungranted.example/x' },
     );
 
-    // Not a gate-403 — the pod's own response is relayed (a 401 here), proving native passthrough.
-    expect(res.status).toBe(401);
-    // The egress to the pod carried NO credential (unauthenticated passthrough).
-    const podCall = fetchCalls.find((c) => c.url.startsWith('https://alice.pod.example'));
-    expect(podCall).toBeDefined();
-    const headers = (podCall?.init?.headers as Record<string, string>) ?? {};
-    expect(headers.Authorization).toBeUndefined();
-    expect(headers.DPoP).toBeUndefined();
+    // Not a gate-403 — a passthrough sentinel, and NO SW egress to the pod.
+    expect(res.passthrough).toBe(true);
+    expect(res.status).toBeUndefined();
+    expect(res.error).toBeUndefined();
+    expect(fetchCalls.some((c) => c.url.startsWith('https://alice.pod.example'))).toBe(false);
   });
 
-  it('a GRANTED pod read still gets the AUTHENTICATED replica path even with autoDivert set', async () => {
+  it('a GRANTED pod read still gets the AUTHENTICATED replica path even with autoDivert set (no sentinel)', async () => {
     // autoDivert must NOT downgrade a legitimate granted pod read — that is still gated+authed.
     await seedSession();
     storage.set('solid:granted-origins', ['https://pm.example']);
@@ -700,6 +725,7 @@ describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un
       { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
     );
 
+    expect(res.passthrough).toBeUndefined();
     expect(res.status).toBe(200);
     expect(res.body).toBe('private-pod-bytes');
     const podCall = fetchCalls.find((c) => c.url.startsWith('https://alice.pod.example'));
@@ -709,42 +735,10 @@ describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un
     expect(headers.DPoP).toBeDefined();
   });
 
-  it('a native passthrough STRIPS any page-supplied Authorization/DPoP/Cookie header (defence-in-depth)', async () => {
-    await seedSession();
-    storage.set('solid:granted-origins', ['https://pm.example']);
-    fetchImpl = async () => new Response('ok', { status: 200 });
-    await loadWorker();
-
-    const res = await sendFetch(
-      {
-        url: 'https://api.thirdparty.example/data',
-        stampedOrigin: 'https://pm.example',
-        autoDivert: true,
-        headers: {
-          Authorization: 'Bearer page-smuggled',
-          DPoP: 'page-proof',
-          Cookie: 'sid=1',
-          'X-App': 'keep',
-        },
-      },
-      { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
-    );
-
-    expect(res.status).toBe(200);
-    const call = fetchCalls.find((c) => c.url.startsWith('https://api.thirdparty.example'));
-    const headers = (call?.init?.headers as Record<string, string>) ?? {};
-    // The page cannot smuggle its own auth/cookie through the extension's privileged fetch.
-    expect(headers.Authorization).toBeUndefined();
-    expect(headers.DPoP).toBeUndefined();
-    expect(headers.Cookie).toBeUndefined();
-    // A benign app header survives.
-    expect(headers['X-App']).toBe('keep');
-  });
-
-  it('an autoDivert request to an OPAQUE/forged origin still passes through (never hard-fails the page)', async () => {
-    // Even a dual-origin mismatch (which would DENY the gated path) becomes a plain passthrough
-    // under autoDivert — the invariant is that normal web traffic is never broken. No credential
-    // is ever attached on this path, so passthrough cannot widen access.
+  it('an autoDivert request to an OPAQUE/forged origin → sentinel with NO SW fetch (never hard-fails, never proxies)', async () => {
+    // Even a dual-origin mismatch (which would DENY the gated path) becomes a sentinel under
+    // autoDivert — normal web traffic is never broken, but the SW still does NO network: the
+    // page completes it natively in its own origin context.
     await seedSession();
     storage.set('solid:granted-origins', ['https://pm.example']);
     fetchImpl = async () => new Response('cdn-asset', { status: 200 });
@@ -755,16 +749,16 @@ describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un
       { origin: 'https://attacker.example', url: 'https://attacker.example/x' }, // sender ≠ stamp
     );
 
-    expect(res.status).toBe(200);
-    expect(res.body).toBe('cdn-asset');
-    const call = fetchCalls.find((c) => c.url.startsWith('https://cdn.example'));
-    const headers = (call?.init?.headers as Record<string, string>) ?? {};
-    expect(headers.Authorization).toBeUndefined();
+    expect(res.passthrough).toBe(true);
+    expect(res.body).toBeUndefined();
+    // The SW did NOT fetch the CDN — the page will, natively.
+    expect(fetchCalls.some((c) => c.url.startsWith('https://cdn.example'))).toBe(false);
   });
 
-  it('an autoDivert fetch with NO session passes through natively (the explicit path says Not authenticated)', async () => {
+  it('an autoDivert fetch with NO session → sentinel, NO SW fetch (explicit path says Not authenticated)', async () => {
     // No session seeded. The explicit window.solid.fetch returns "Not authenticated"; an
-    // autoDivert request just does the plain fetch the page would have done (no creds exist).
+    // autoDivert request gets a sentinel so the page does the plain native fetch (no creds exist),
+    // and the SW performs no network.
     fetchImpl = async () => new Response('public-resource', { status: 200 });
     await loadWorker();
 
@@ -776,8 +770,9 @@ describe('HIGH #1: autoDivert (global-fetch patch) NEVER hard-fails non-pod / un
       },
       { origin: 'https://pm.example', url: 'https://pm.example/app.html' },
     );
-    expect(res.status).toBe(200);
-    expect(res.body).toBe('public-resource');
+    expect(res.passthrough).toBe(true);
+    expect(res.status).toBeUndefined();
     expect(res.error).toBeUndefined();
+    expect(fetchCalls.some((c) => c.url.startsWith('https://api.thirdparty.example'))).toBe(false);
   });
 });

@@ -35,12 +35,15 @@ export interface FetchRequest {
    * deliberately DUMB — it routes EVERY cross-origin request and lets the SW (the sole
    * boundary) decide. For an auto-diverted request the SW must NEVER hard-fail the page's
    * normal web traffic: when the gate does not ALLOW (a non-pod target, or an un-granted
-   * requesting origin) the SW performs a plain NATIVE UNAUTHENTICATED passthrough (no token,
-   * no replica) instead of a 403 — so an app's calls to third-party APIs/CDNs are not broken.
-   * Credentials + the replica are applied ONLY on an explicit gate ALLOW. (High #1.)
+   * requesting origin) the SW returns a {@link FetchResponse.passthrough} SENTINEL (no body,
+   * no status, NO network from the SW) and the page-side inject completes it with its OWN
+   * native `fetch` — so an app's calls to third-party APIs/CDNs behave EXACTLY as native
+   * (CORS, credentials, headers all preserved) and the SW never acts as a cross-origin proxy.
+   * Credentials + the replica are applied ONLY on an explicit gate ALLOW. (Round-2 High #1.)
    *
    * An EXPLICIT `window.solid.fetch(...)` (this flag absent/false) keeps the 403 deny — the
    * caller deliberately asked for the gated fetch, so a deny is the correct, expected result.
+   * It NEVER receives a passthrough sentinel.
    */
   readonly autoDivert?: boolean;
 }
@@ -90,6 +93,18 @@ export interface FetchResponse {
   readonly headers?: Record<string, string>;
   readonly body?: string;
   readonly error?: string;
+  /**
+   * A PASSTHROUGH SENTINEL: `true` ⇒ the SW declined this `autoDivert` request WITHOUT
+   * performing any network — there is NO `status`/`headers`/`body` here, no fetched bytes. The
+   * page-side inject (MAIN world) must complete it by calling the page's own PRISTINE native
+   * `fetch` with the ORIGINAL input/init, in the page's origin context, so CORS / credentials /
+   * headers behave EXACTLY as if the extension were not installed. The SW is NEVER a
+   * cross-origin proxy: it does ZERO egress for a non-allowed `autoDivert` request and returns
+   * only this flag, so it can never read cross-origin bytes a page's own CORS would block.
+   * Only `autoDivert` requests receive a sentinel; an explicit `window.solid.fetch` gets its
+   * 403 / "Not authenticated" instead.
+   */
+  readonly passthrough?: boolean;
 }
 
 /**

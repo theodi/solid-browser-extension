@@ -249,11 +249,12 @@ async function handleFetch(
   // effect (refresh-token amplification). The browser-attested sender is the authority.
   const requestingOrigin = resolveRequestingOrigin(sender, message.stampedOrigin);
   if (requestingOrigin === null) {
-    // HIGH #1: a forged/opaque origin on the EXPLICIT path is a 403. But an `autoDivert`
-    // request (the global-fetch patch) must never hard-fail the page — and crucially this
-    // early-reject path is reached BEFORE any session work, so no credential is in scope. A
-    // native unauthenticated passthrough is therefore safe (no token) and preserves page compat.
-    if (message.autoDivert) return await nativePassthrough(message);
+    // Round-2 HIGH #1: a forged/opaque origin on the EXPLICIT path is a 403. An `autoDivert`
+    // request (the global-fetch patch) must never hard-fail the page — but the SW must NOT do
+    // the fallback fetch itself (that would make the extension a cross-origin read proxy). It
+    // returns a PASSTHROUGH SENTINEL (no network) and the page-side inject does the native
+    // fetch in the page's own origin context.
+    if (message.autoDivert) return passthroughSentinel(message);
     return {
       requestId: message.requestId,
       status: 403,
@@ -263,9 +264,10 @@ async function handleFetch(
 
   const ctx = await ensureSession();
   if (!ctx) {
-    // No session: the explicit path reports "Not authenticated"; an autoDivert request just does
-    // the plain fetch the page would have done itself (no credential exists to attach anyway).
-    if (message.autoDivert) return await nativePassthrough(message);
+    // No session: the explicit path reports "Not authenticated"; an autoDivert request gets the
+    // passthrough sentinel so the page does the plain native fetch it would have done itself (no
+    // credential exists to attach anyway, and the SW performs no network).
+    if (message.autoDivert) return passthroughSentinel(message);
     return { requestId: message.requestId, error: 'Not authenticated' };
   }
 
@@ -329,16 +331,21 @@ async function handleFetch(
       // The gate denied (incl. on a would-be cache hit). The replica touched NEITHER the pod
       // NOR the cache before denying, so nothing leaked.
       //
-      // HIGH #1 — page-compat invariant: a request that came from the BEST-EFFORT global-fetch
-      // transparency patch (`autoDivert`) must NEVER be hard-failed. The patch routes EVERY
-      // cross-origin request, so a DENY here is the common case for an app's NORMAL traffic to
-      // a third-party API/CDN (a non-pod target) or from an un-granted origin. For those we do
-      // a plain NATIVE UNAUTHENTICATED passthrough — NO token, NO replica, NO 403 — so the page
-      // behaves exactly as if the extension were not installed. This can never widen access (a
-      // native fetch carries no credential). An EXPLICIT `window.solid.fetch` (autoDivert false)
-      // keeps the 403: the caller deliberately asked for the gated path.
+      // Round-2 HIGH #1 — page-compat invariant: a request that came from the BEST-EFFORT
+      // global-fetch transparency patch (`autoDivert`) must NEVER be hard-failed. The patch
+      // routes EVERY cross-origin request, so a DENY here is the common case for an app's NORMAL
+      // traffic to a third-party API/CDN (a non-pod target) or from an un-granted origin. For
+      // those the SW returns a PASSTHROUGH SENTINEL — NO token, NO replica, NO 403, and crucially
+      // NO NETWORK FROM THE SW. The page-side inject then completes the request with its OWN
+      // native `fetch` (PRISTINE_FETCH) in the page's origin context, so the page behaves exactly
+      // as if the extension were not installed (CORS, credentials, headers all preserved). This
+      // closes the round-2 hole where the SW (with <all_urls> host perms) doing the fallback
+      // fetch turned the extension into an open cross-origin read proxy. The SW does ZERO egress
+      // on this path, so it can never read cross-origin bytes a page's own CORS would block. An
+      // EXPLICIT `window.solid.fetch` (autoDivert false) keeps the 403: the caller deliberately
+      // asked for the gated path.
       if (message.autoDivert) {
-        return await nativePassthrough(message);
+        return passthroughSentinel(message);
       }
       return {
         requestId: message.requestId,
@@ -375,57 +382,24 @@ function denyResponse(error: string): Response {
   return new Response(error, { status: 403 });
 }
 
-/** Caller-supplied auth/transport headers a page must never inject onto a passthrough fetch. */
-const PASSTHROUGH_STRIP_HEADERS = new Set([
-  'authorization',
-  'dpop',
-  'host',
-  'content-length',
-  'connection',
-  'cookie',
-]);
-
 /**
- * A plain, UNAUTHENTICATED native passthrough for an `autoDivert` request the gate did not
- * ALLOW (High #1). No access token, no DPoP proof, no replica — exactly the fetch the page
- * would have made itself had the global-fetch patch not been installed, so an app's normal
- * traffic to a third-party API/CDN (or a pod read from an un-granted origin) is never broken.
+ * Round-2 HIGH #1 + Medium fix: the PASSTHROUGH SENTINEL the SW returns for an `autoDivert`
+ * request the gate did NOT ALLOW. The SW performs ZERO network here — no token, no DPoP proof,
+ * no replica, and crucially NO fetch at all. It returns only `{ requestId, passthrough: true }`
+ * (no status, no headers, no fetched bytes). The page-side inject (MAIN world) completes the
+ * request by calling its OWN native `fetch` (the captured PRISTINE_FETCH) with the request's
+ * ORIGINAL input/init, in the page's origin context.
  *
- * SECURITY: this carries ZERO credential, so it can never widen access. We still STRIP any
- * page-supplied `Authorization`/`DPoP`/`Cookie`/transport headers (defence-in-depth: a page
- * cannot smuggle its own auth header through the extension's privileged fetch), and we relay
- * only the allowlisted response headers, identically to the gated path.
+ * WHY (the round-2 finding): doing the fallback fetch FROM THE SW — which holds `<all_urls>`
+ * host permissions — turned the extension into an OPEN CROSS-ORIGIN READ PROXY: any page could
+ * `postMessage` an `autoDivert` request and read back cross-origin bytes that CORS would
+ * normally block. Returning a sentinel and letting the PAGE do the fetch restores EXACT native
+ * semantics (CORS, credentials, headers) and means the SW never reads bytes a page could not
+ * read itself. It also removes the header-stripping / `credentials:'omit'` divergence (Medium):
+ * the page's native fetch applies the page's real headers + credentials policy, unchanged.
  */
-async function nativePassthrough(message: FetchRequest): Promise<FetchResponse> {
-  const safeHeaders: Record<string, string> = {};
-  for (const [k, v] of Object.entries(message.headers)) {
-    if (!PASSTHROUGH_STRIP_HEADERS.has(k.toLowerCase())) safeHeaders[k] = v;
-  }
-  try {
-    const isRead = READ_METHODS.has(message.method.toUpperCase());
-    const response = await fetch(message.url, {
-      method: message.method,
-      headers: safeHeaders,
-      body: isRead ? undefined : message.body,
-      // Never attach the user's ambient cookies to a cross-origin proxied request.
-      credentials: 'omit',
-    });
-    const headers = filterResponseHeaders(response.headers);
-    // A HEAD response must carry no body (Low #5); a GET/other relays the text body.
-    const isHead = message.method.toUpperCase() === 'HEAD';
-    return {
-      requestId: message.requestId,
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-      body: isHead ? undefined : await response.text(),
-    };
-  } catch (err) {
-    return {
-      requestId: message.requestId,
-      error: err instanceof Error ? err.message : 'Fetch failed',
-    };
-  }
+function passthroughSentinel(message: FetchRequest): FetchResponse {
+  return { requestId: message.requestId, passthrough: true };
 }
 
 /** Best-effort: fetch + parse the WebID profile (name/photo) and persist it. */

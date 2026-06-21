@@ -16,7 +16,74 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportDpopKeyPair, generateDpopKeyPair } from '../src/background/core/dpop';
+import type { ReplicaMetadata } from '../src/background/core/replica-db';
 import type { StoredSession } from '../src/background/session-store';
+
+// --- In-memory replica stores (Phase 1) -----------------------------------------------
+// The fetch path now routes through the shared replica, which opens IndexedDB (metadata +
+// nonce) and the Cache API. Stub both so the Phase-0 gate assertions below run unchanged:
+// a DENY must still produce NO egress, an ALLOW must still reach the pod with the token.
+const idbMeta = new Map<string, ReplicaMetadata>();
+const idbNonces = new Map<string, string>();
+class FakeReplicaDb {
+  static async open() {
+    return new FakeReplicaDb();
+  }
+  async getMetadata(key: string) {
+    return idbMeta.get(key);
+  }
+  async putMetadata(record: ReplicaMetadata) {
+    idbMeta.set(record.key, record);
+  }
+  async deleteMetadata(key: string) {
+    idbMeta.delete(key);
+  }
+  async getMetadataByWebId(webId: string) {
+    return [...idbMeta.values()].filter((r) => r.webId === webId);
+  }
+  async deleteMetadataByWebId(webId: string) {
+    for (const [k, v] of idbMeta) if (v.webId === webId) idbMeta.delete(k);
+  }
+  async clearMetadata() {
+    idbMeta.clear();
+  }
+  async getNonce(origin: string) {
+    return idbNonces.get(origin);
+  }
+  async setNonce(origin: string, nonce: string) {
+    idbNonces.set(origin, nonce);
+  }
+  async clearNonces() {
+    idbNonces.clear();
+  }
+  close() {}
+}
+vi.mock('../src/background/core/replica-db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/background/core/replica-db')>();
+  return { ...actual, ReplicaDb: FakeReplicaDb };
+});
+const cacheStore = new Map<
+  string,
+  { body: string; status: number; headers: Record<string, string> }
+>();
+function installCaches(): void {
+  (globalThis as unknown as { caches: unknown }).caches = {
+    open: async () => ({
+      match: async (request: Request) => {
+        const e = cacheStore.get(request.url);
+        return e ? new Response(e.body, { status: e.status, headers: e.headers }) : undefined;
+      },
+      put: async (request: Request, response: Response) => {
+        cacheStore.set(request.url, {
+          body: await response.text(),
+          status: response.status,
+          headers: Object.fromEntries(response.headers.entries()),
+        });
+      },
+      delete: async (request: Request) => cacheStore.delete(request.url),
+    }),
+  };
+}
 
 // --- An in-memory chrome.* stub + a captured fetch ------------------------------------
 
@@ -161,6 +228,10 @@ async function loadWorker(): Promise<void> {
 
 beforeEach(() => {
   installChrome();
+  installCaches();
+  cacheStore.clear();
+  idbMeta.clear();
+  idbNonces.clear();
 });
 
 describe('service-worker per-requesting-origin gate (wired)', () => {

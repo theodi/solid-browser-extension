@@ -3,7 +3,7 @@
   "name": "Solid",
   "version": "0.2.0",
   "description": "Sign in to Solid at the browser level — injects window.solid (DPoP-authenticated fetch) and a pinned account menu.",
-  "permissions": ["storage", "identity", "sidePanel", "contextMenus"],
+  "permissions": ["storage", "identity", "sidePanel", "contextMenus", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background/service-worker.js",

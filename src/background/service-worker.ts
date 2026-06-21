@@ -34,6 +34,13 @@ import { authenticatedFetch, type FetchSession } from './core/authenticated-fetc
 import { importDpopKeyPair } from './core/dpop';
 import { computeAllowedOrigins, isValidClientIdUrl } from './core/origin-policy';
 import {
+  type EgressPort,
+  purgeReplica,
+  type ReplicaByteCache,
+  SharedReplica,
+} from './core/replica';
+import { ReplicaDb } from './core/replica-db';
+import {
   computeGrantedOrigins,
   decideRequestingOrigin,
   isRequestingOriginGranted,
@@ -43,6 +50,7 @@ import {
 import { filterResponseHeaders } from './core/response-headers';
 import { SingleFlight } from './core/single-flight';
 import { parseWebIdProfile } from './core/webid';
+import { registerGlobalFetchInjection } from './global-fetch-register';
 import {
   clearProfile,
   clearSession,
@@ -62,11 +70,31 @@ import { registerSidePanel } from './side-panel';
 const ALLOW_INSECURE_LOOPBACK = true; // dev CSS over http://localhost; harmless for https issuers.
 const EXPIRY_BUFFER_MS = 30_000;
 
+/** The Cache API bucket holding the shared replica's bytes (one physical store, see replica.ts). */
+const REPLICA_CACHE_NAME = 'solid-ext-replica-bytes';
+
 /** Best-effort in-memory caches (re-hydrated from storage on SW wake). */
 let cachedSession: StoredSession | null = null;
 let cachedKeyPair: CryptoKeyPair | null = null;
-/** A cached server DPoP nonce per resource origin, to skip the first §8 round-trip. */
-const nonceByOrigin = new Map<string, string>();
+
+/**
+ * The replica IndexedDB handle (metadata + the DPoP nonce cache). Re-derivable on every SW
+ * wake — a best-effort accelerator, never load-bearing in-memory state (MV3 invariant). The
+ * DPoP nonce cache lives in IndexedDB (NOT an in-memory Map) so a cold wake does not pay the
+ * RFC 9449 §8 nonce round-trip on its first request (design §2.1, §5.2).
+ */
+let replicaDbHandle: ReplicaDb | null = null;
+
+/** Lazily open (once per wake) the replica DB. */
+async function getReplicaDb(): Promise<ReplicaDb> {
+  if (!replicaDbHandle) replicaDbHandle = await ReplicaDb.open();
+  return replicaDbHandle;
+}
+
+/** The named Cache bucket for replica bytes (re-opened lazily; available in the SW context). */
+function getReplicaCache(): Promise<ReplicaByteCache> {
+  return caches.open(REPLICA_CACHE_NAME) as Promise<ReplicaByteCache>;
+}
 /**
  * Single-flight refresh: concurrent near-expiry requests must NOT each start a refresh
  * with the same (rotation-bound) refresh token — that races, so one grant succeeds and the
@@ -109,10 +137,30 @@ async function ensureSession(): Promise<{ session: StoredSession; keyPair: Crypt
   return { session: cachedSession, keyPair: cachedKeyPair };
 }
 
+/**
+ * Tear down the session AND SYNCHRONOUSLY purge the shared replica BEFORE returning, so no
+ * subsequent (returning / different-user) read can be served a single departed-identity byte
+ * (design §4.3 "Cross-USER stale bytes", §5.4 point 5). The logout handler AWAITS this; the
+ * purge (replica bytes + metadata + cached DPoP nonces) completes before any further serve.
+ * `priorWebId` scopes the purge to exactly that identity's rows; a missing prior WebID purges
+ * everything (fail-closed). The WebID-in-key already makes a cross-user collision impossible;
+ * this removes the prior rows entirely so even a same-key re-provision cannot collide.
+ */
 async function teardownSession(): Promise<void> {
+  const priorWebId = (cachedSession ?? (await loadSession()))?.webId ?? null;
   cachedSession = null;
   cachedKeyPair = null;
-  nonceByOrigin.clear();
+
+  // SYNCHRONOUS-BEFORE-SERVE replica purge. Best-effort on the stores (a missing DB must not
+  // block sign-out), but AWAITED so it precedes any new serve.
+  try {
+    const [cache, db] = await Promise.all([getReplicaCache(), getReplicaDb()]);
+    await purgeReplica(cache, db, priorWebId);
+  } catch {
+    // If the replica stores are unavailable, sign-out still proceeds (no bytes to leak when
+    // the store never opened). The WebID-scoped key means a future session cannot read them.
+  }
+
   await Promise.all([clearSession(), clearProfile()]);
   await setSignedOutIcon();
 }
@@ -189,6 +237,8 @@ async function gateRequestingOrigin(
   return { requestingOrigin: decision.requestingOrigin };
 }
 
+const READ_METHODS = new Set(['GET', 'HEAD']);
+
 async function handleFetch(
   message: FetchRequest,
   sender: MessageSender | undefined,
@@ -212,25 +262,70 @@ async function handleFetch(
   try {
     const fetchSession = await buildFetchSession(ctx.session, ctx.keyPair);
 
-    // THEN the grant + foreign-fetch half (needs the session's credential origins): the
-    // per-requesting-origin default-deny gate, BEFORE any pod egress or cache read.
-    const gate = await gateRequestingOrigin(
-      message,
-      requestingOrigin,
-      sender,
-      fetchSession.allowedOrigins,
-    );
-    if ('error' in gate) return gate.error;
+    // The INJECTED gate the replica runs as the FIRST step on EVERY read AND write — including
+    // on a CACHE HIT (design §5.4 point 3). It re-runs the SAME audited `gateRequestingOrigin`
+    // decision (idempotent) and returns the verified grant-scope on ALLOW; the replica never
+    // touches the cache or the pod before this resolves to ALLOW, so a warm cache can never
+    // bypass the per-origin gate.
+    const gate = async (): Promise<{ grantScope: string } | { deny: Response }> => {
+      const decision = await gateRequestingOrigin(
+        message,
+        requestingOrigin,
+        sender,
+        fetchSession.allowedOrigins,
+      );
+      if ('error' in decision) {
+        return { deny: denyResponse(decision.error.error ?? DENY_MESSAGE['forbidden-origin']) };
+      }
+      return { grantScope: decision.requestingOrigin };
+    };
 
     const origin = originOf(message.url);
-    const result = await authenticatedFetch(fetchSession, {
-      url: message.url,
-      method: message.method,
-      headers: message.headers,
-      body: message.body,
-      nonce: origin ? nonceByOrigin.get(origin) : undefined,
+    const db = await getReplicaDb();
+    const cache = await getReplicaCache();
+    const nonce = origin ? await db.getNonce(origin) : undefined;
+
+    // The SW's sole DPoP egress (authenticated-fetch.ts), wrapped as the replica's egress
+    // port. The DPoP-bound, origin-gated, §8-nonce-retry egress is PRESERVED VERBATIM — the
+    // replica only chooses WHEN to call it (revalidate vs write-through) and adds the
+    // conditional header; it never re-implements the credential path.
+    const egress: EgressPort = {
+      fetch: async (url, method, headers, body, n) => {
+        const result = await authenticatedFetch(fetchSession, {
+          url,
+          method,
+          headers,
+          body,
+          nonce: n,
+        });
+        return { response: result.response, nonce: result.nonce };
+      },
+    };
+
+    const replica = new SharedReplica({
+      gate,
+      egress,
+      cache,
+      db,
+      webId: ctx.session.webId,
     });
-    if (origin && result.nonce) nonceByOrigin.set(origin, result.nonce);
+
+    const isRead = READ_METHODS.has(message.method.toUpperCase());
+    const result = isRead
+      ? await replica.read(message.url, message.method, message.headers, nonce)
+      : await replica.write(message.url, message.method, message.headers, message.body, nonce);
+
+    if ('deny' in result) {
+      // The gate denied (incl. on a would-be cache hit) — relay the 403 verbatim.
+      return {
+        requestId: message.requestId,
+        status: result.deny.status,
+        error: await result.deny.text(),
+      };
+    }
+
+    // Persist the freshest server nonce to IndexedDB so it survives an SW restart.
+    if (origin && result.nonce) await db.setNonce(origin, result.nonce);
 
     // Defense-in-depth: relay only the allowlisted, app-relevant response headers back to
     // the page rather than every header the server emitted (see response-headers.ts).
@@ -248,6 +343,11 @@ async function handleFetch(
       error: err instanceof Error ? err.message : 'Fetch failed',
     };
   }
+}
+
+/** A small Response carrying a gate-deny reason, for the replica's injected gate port. */
+function denyResponse(error: string): Response {
+  return new Response(error, { status: 403 });
 }
 
 /** Best-effort: fetch + parse the WebID profile (name/photo) and persist it. */
@@ -474,6 +574,10 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
     chrome.storage.local.set({ 'solid:show-pin-nudge': true }).catch(() => {});
   }
+  // (Re-)register the MAIN-world global-fetch-patch injection on install/update — the most
+  // reliable MAIN injection (design §5.1). Belt-and-braces with the manifest content script;
+  // non-fatal if unavailable (the SW gate is the sole security boundary regardless).
+  void registerGlobalFetchInjection();
 });
 
 // Wire the persistent side panel: a right-click "Open Solid side panel" action-menu entry

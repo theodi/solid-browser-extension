@@ -147,5 +147,69 @@ const solid: SolidExtension = {
 
 Object.defineProperty(window, 'solid', { value: Object.freeze(solid), configurable: false });
 
+// --- The MAIN-world global-`fetch` patch (design §5.1) ---------------------------------
+//
+// Generalises the `window.solid.fetch` proxy: transparently route a page's PLAIN
+// `fetch(podUrl)` through the extension (→ ISOLATED bridge → SW → DPoP egress) so an
+// unmodified Solid app gets authenticated, replica-backed reads/writes with no code change.
+//
+// SECURITY (load-bearing): this patch is BEST-EFFORT TRANSPARENCY with ZERO security weight
+// (design §5.1). The SW gate remains the SOLE boundary — EVERY routed request still goes
+// through the Phase-0 per-requesting-origin gate as the FIRST check (in the SW). The patch is
+// racy + bypassable by design; a missed/bypassed request is a plain unauthenticated fetch
+// (pod 401, fail-safe for the credential) governed by the server's own WAC. The patch can
+// NEVER widen access — it only forwards to the same gated `solid.fetch` path.
+//
+// Re-assert discipline (the @jeswr/solid-elements `installProactiveAuthFetch` pattern):
+// snapshot the PRISTINE fetch FIRST, install once (idempotent), and never re-read a
+// possibly-patched global. A later page script that overwrites `window.fetch` only affects
+// ITS OWN requests — it gains no credential (the SW gate is the boundary).
+const PRISTINE_FETCH = window.fetch.bind(window);
+
+/**
+ * Whether a request should be diverted to the gated `solid.fetch`. We divert only http(s)
+ * cross/absolute URLs that are NOT same-origin as the page (a Solid pod is on a different
+ * origin than the app); same-origin + relative requests keep the untouched native fetch (no
+ * proxy tax, no breakage of the app's own asset loads). The SW gate makes the final
+ * authorize/deny call — over-diverting only yields a gate DENY, never a leak.
+ */
+function shouldDivert(input: RequestInfo | URL): boolean {
+  try {
+    const url = new URL(
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url,
+      window.location.href,
+    );
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+    // Same-origin requests are the app's own assets/APIs — leave them on native fetch.
+    return url.origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+const patchedFetch: typeof fetch = (input, init) => {
+  if (shouldDivert(input)) {
+    // A Request object (not a plain URL/string) carries a body/headers the bridge can't
+    // currently serialise structurally — pass it through solidFetch via its URL + init only
+    // for the simple (string/URL) case; a complex Request falls back to native fetch (the SW
+    // gate still governs the eventual pod read if the app re-issues it through window.solid).
+    if (typeof input === 'string' || input instanceof URL) {
+      return solidFetch(input, init);
+    }
+  }
+  return PRISTINE_FETCH(input as RequestInfo, init);
+};
+
+try {
+  window.fetch = patchedFetch;
+} catch {
+  // If a page froze `fetch`, transparency is simply unavailable on it (the SW path via
+  // window.solid.fetch still works). The patch is best-effort by design.
+}
+
 // Ask the worker for the current session state on load (populates window.solid.webId).
 postToContent({ type: 'SOLID_GET_STATE' });

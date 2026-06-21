@@ -28,6 +28,7 @@ interface CreatedMenu {
 let createdMenus: CreatedMenu[];
 let menuClickListeners: MenuClickListener[];
 let removeAllCalls: number;
+let removedIds: string[];
 let openCalls: Array<{ windowId?: number; tabId?: number }>;
 
 function installChrome(opts: { sidePanel?: boolean; contextMenus?: boolean } = {}): void {
@@ -35,18 +36,26 @@ function installChrome(opts: { sidePanel?: boolean; contextMenus?: boolean } = {
   createdMenus = [];
   menuClickListeners = [];
   removeAllCalls = 0;
+  removedIds = [];
   openCalls = [];
 
   const chromeStub: Record<string, unknown> = {
     runtime: {
+      lastError: undefined as { message?: string } | undefined,
       onInstalled: { addListener: (_fn: () => void) => {} },
     },
   };
   if (contextMenus) {
     chromeStub.contextMenus = {
+      // removeAll MUST NOT be used by the production code (it would clobber other menus); we
+      // keep the stub so a regression to removeAll() is observable via removeAllCalls.
       removeAll: () => {
         removeAllCalls += 1;
         return Promise.resolve();
+      },
+      remove: (id: string, callback?: () => void) => {
+        removedIds.push(id);
+        callback?.();
       },
       create: (menu: CreatedMenu) => {
         createdMenus.push(menu);
@@ -76,16 +85,26 @@ afterEach(() => {
 describe('registerSidePanel — context-menu entry', () => {
   beforeEach(() => installChrome());
 
-  it('creates a single "Open Solid side panel" entry on the action context (idempotent removeAll first)', async () => {
+  it('creates a single "Open Solid side panel" entry on the action context (idempotent remove-OWN-id first)', async () => {
     registerSidePanel();
-    // createSidePanelMenu is async (removeAll → create); let it settle.
+    // createSidePanelMenu is async (remove → create); let it settle.
     await Promise.resolve();
     await Promise.resolve();
-    expect(removeAllCalls).toBeGreaterThanOrEqual(1);
     expect(createdMenus).toHaveLength(1);
     expect(createdMenus[0].title).toBe('Open Solid side panel');
     expect(createdMenus[0].contexts).toEqual(['action']);
     expect(typeof createdMenus[0].id).toBe('string');
+  });
+
+  it('removes ONLY its own menu id before re-creating — never removeAll() (would clobber other menus)', async () => {
+    registerSidePanel();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The fix: a targeted remove of exactly the side-panel id, NOT a blanket removeAll().
+    expect(removeAllCalls).toBe(0);
+    expect(removedIds).toHaveLength(1);
+    // The removed id is the same id that is then (re-)created — idempotent for just our item.
+    expect(removedIds[0]).toBe(createdMenus[0].id);
   });
 
   it('registers a click listener', () => {

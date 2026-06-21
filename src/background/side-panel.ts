@@ -19,12 +19,33 @@
 
 const OPEN_SIDE_PANEL_MENU_ID = 'solid-open-side-panel';
 
+/**
+ * Remove ONLY our own side-panel menu entry (if present), ignoring the "item not found"
+ * error so first-create is fine. We must NOT use `contextMenus.removeAll()` here: that would
+ * delete EVERY context-menu item the extension owns, clobbering any other/future menu.
+ */
+function removeSidePanelMenu(): Promise<void> {
+  return new Promise((resolve) => {
+    if (!chrome.contextMenus?.remove) {
+      resolve();
+      return;
+    }
+    // The callback form lets us swallow chrome.runtime.lastError (the "Cannot find menu item"
+    // error on first run / after a SW restart cleared the registry) without it surfacing.
+    chrome.contextMenus.remove(OPEN_SIDE_PANEL_MENU_ID, () => {
+      void chrome.runtime?.lastError; // read-and-discard so it isn't reported
+      resolve();
+    });
+  });
+}
+
 /** Create the "Open Solid side panel" context-menu entry on the action icon. */
 async function createSidePanelMenu(): Promise<void> {
   if (!chrome.contextMenus?.create) return;
   try {
-    // Remove-then-create is idempotent across SW restarts / reinstalls (a duplicate id throws).
-    await chrome.contextMenus.removeAll();
+    // Remove-OUR-id-then-create is idempotent across SW restarts / reinstalls (a duplicate id
+    // throws) WITHOUT clobbering any other menu item — removeAll() would regress those.
+    await removeSidePanelMenu();
     chrome.contextMenus.create({
       id: OPEN_SIDE_PANEL_MENU_ID,
       title: 'Open Solid side panel',

@@ -18,4 +18,11 @@ import '@jeswr/solid-elements';
 import { mountAccountSurface, resolveAccountSurfaceElements } from '../popup/account-surface';
 
 // Wire the shared account surface (busy → signed-in / signed-out, all the auth invariants).
-mountAccountSurface(resolveAccountSurfaceElements());
+// The side panel is LONG-LIVED (persists across navigation), so — unlike the ephemeral popup —
+// we keep the cleanup handle and detach the listeners on teardown. Without this, the long-lived
+// `chrome.runtime.onMessage` listener (and its refresh() calls) would leak / accumulate across
+// any remount. (mountAccountSurface also guards against double-mounting the same document.)
+const { cleanup } = mountAccountSurface(resolveAccountSurfaceElements());
+
+// `pagehide` fires when the panel document is torn down (closed / navigated away); detach there.
+globalThis.addEventListener?.('pagehide', cleanup, { once: true });

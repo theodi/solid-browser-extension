@@ -51,6 +51,25 @@ export interface AccountSurfaceElements {
 
 type View = 'signed-out' | 'busy' | 'signed-in';
 
+/**
+ * What {@link mountAccountSurface} returns: the live bridge controller (so callers/tests can
+ * inspect it) plus a `cleanup` that detaches every listener this mount added (notably the
+ * long-lived `chrome.runtime.onMessage` listener). The ephemeral popup can ignore the result;
+ * the persistent side panel MUST call `cleanup()` on teardown, otherwise a remount accumulates
+ * duplicate `onMessage` listeners (and duplicate refresh() calls) on the long-lived document.
+ */
+export interface MountedAccountSurface {
+  readonly controller: MessageBridgeLoginController;
+  readonly cleanup: () => void;
+}
+
+/**
+ * A weak guard against double-mounting the SAME document: each mount tags its host document so a
+ * second mount (e.g. an accidental re-import in the long-lived side panel) is a no-op that just
+ * returns the existing mount's handle rather than stacking a second set of listeners.
+ */
+const MOUNTED = new WeakMap<Document, MountedAccountSurface>();
+
 /** Resolve the standard surface elements from a root document by their shared ids. */
 export function resolveAccountSurfaceElements(doc: Document = document): AccountSurfaceElements {
   const byId = <T extends HTMLElement>(id: string): T => doc.getElementById(id) as T;
@@ -71,11 +90,22 @@ function send<T>(message: unknown): Promise<T> {
 /**
  * Wire the shared account surface against `els` and kick off the initial paint
  * ("Restoring…" → state read → signed-in / signed-out). Returns the live controller
- * instance (the bridge) so callers/tests can inspect it. Idempotent per element set:
- * call once per surface (popup.ts and sidepanel.ts each call it on their own DOM).
+ * instance (the bridge) plus a `cleanup` that detaches every listener added here (so the
+ * long-lived side panel can tear down without leaking the `chrome.runtime.onMessage`
+ * listener). Guarded against double-mounting the same document: a second call on a document
+ * already mounted returns the existing handle without stacking another set of listeners.
+ *
+ * The ephemeral popup may ignore the return (it is torn down with its document); the
+ * persistent side panel MUST call `cleanup()` on teardown / before any remount.
  */
-export function mountAccountSurface(els: AccountSurfaceElements): MessageBridgeLoginController {
+export function mountAccountSurface(els: AccountSurfaceElements): MountedAccountSurface {
   const { signedOut, busy, signedIn, loginPanel, accountMenu, shortcutProfile } = els;
+
+  // Double-mount guard: if THIS document is already mounted, do not stack a second set of
+  // listeners (the long-lived side panel's failure mode) — return the existing handle.
+  const hostDoc = loginPanel.ownerDocument;
+  const existing = MOUNTED.get(hostDoc);
+  if (existing) return existing;
 
   // Disable the panel's OWN silent-restore-on-connect via the PROPERTY (not a markup
   // attribute — `auto-restore="false"` reads ambiguous next to Lit's boolean-attribute
@@ -149,34 +179,65 @@ export function mountAccountSurface(els: AccountSurfaceElements): MessageBridgeL
 
   // --- Wiring -------------------------------------------------------------------------
 
+  // Track every detach so cleanup() removes ALL listeners this mount added (the long-lived
+  // side panel relies on this; the ephemeral popup may ignore it).
+  const detachers: Array<() => void> = [];
+
   // The panel drives login via the bridge (chrome.identity flow in the worker).
-  loginPanel.addEventListener('login', (e) => {
+  const onLogin = (e: Event): void => {
     const detail = (e as CustomEvent<LoginDetail>).detail;
     if (detail?.webId) void refresh();
-  });
-  loginPanel.addEventListener('session-change', (e) => {
+  };
+  loginPanel.addEventListener('login', onLogin);
+  detachers.push(() => loginPanel.removeEventListener('login', onLogin));
+
+  const onSessionChange = (e: Event): void => {
     const detail = (e as CustomEvent<SessionChangeDetail>).detail;
     // A logged-IN change → confirm with the worker and render signed-in. A logged-OUT
     // change (incl. the one emitted during the showSignedOut() swap) only needs the
     // signed-out section visible — NOT another swap (which would re-emit and recurse).
     if (detail?.loggedIn) void refresh();
     else show('signed-out');
-  });
+  };
+  loginPanel.addEventListener('session-change', onSessionChange);
+  detachers.push(() => loginPanel.removeEventListener('session-change', onSessionChange));
 
   // The account-menu emits `sign-out` → tear down in the worker, then re-render.
-  accountMenu.addEventListener('sign-out', () => {
+  const onSignOut = (): void => {
     void send({ type: 'SOLID_LOGOUT' }).then(() => refresh());
-  });
+  };
+  accountMenu.addEventListener('sign-out', onSignOut);
+  detachers.push(() => accountMenu.removeEventListener('sign-out', onSignOut));
 
   // React to background state broadcasts while the surface is open (a page logs in, or the
-  // worker's token expires/logs out): re-read state and re-render.
-  chrome.runtime.onMessage.addListener((message) => {
+  // worker's token expires/logs out): re-read state and re-render. This is the LONG-LIVED
+  // listener: the side panel persists across navigation, so a remount without cleanup would
+  // accumulate duplicate onMessage listeners (and duplicate refresh() calls).
+  const onRuntimeMessage = (message: { type?: string }): void => {
     if (message?.type === 'SOLID_STATE_CHANGED') void refresh();
-  });
+  };
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  detachers.push(() => chrome.runtime?.onMessage?.removeListener?.(onRuntimeMessage));
 
   // Initial paint: show "Restoring" while we read state.
   show('busy');
   void refresh();
 
-  return bridge;
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) return; // idempotent
+    cleaned = true;
+    refreshGeneration++; // fence: any in-flight refresh resolving after teardown is a no-op
+    for (const detach of detachers) detach();
+    MOUNTED.delete(hostDoc);
+  };
+
+  const mounted: MountedAccountSurface = {
+    get controller() {
+      return bridge;
+    },
+    cleanup,
+  };
+  MOUNTED.set(hostDoc, mounted);
+  return mounted;
 }

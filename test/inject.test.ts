@@ -82,6 +82,21 @@ describe('inject — installs window.solid + patches fetch', () => {
     // The global fetch is no longer the pristine sentinel.
     expect(dom.window.fetch).not.toBe(nativeFetch);
   });
+
+  it('announces presence: a sticky <html data-solid-extension> marker + a solid-extension:ready event', async () => {
+    // A page hides its own account chrome when the extension is present; it needs a reliable,
+    // race-free presence signal. Assert BOTH announce channels the inject sets up.
+    const readyEvents: Event[] = [];
+    dom.window.addEventListener('solid-extension:ready', (e) => readyEvents.push(e));
+    expect(dom.window.document.documentElement.getAttribute('data-solid-extension')).toBeNull();
+    await importInject();
+    // 1. the STICKY DOM marker — readable synchronously by app code regardless of load order.
+    expect(dom.window.document.documentElement.getAttribute('data-solid-extension')).toBe('1');
+    // 2. the one-shot event — for a listener attached before the inject ran.
+    expect(readyEvents).toHaveLength(1);
+    // The announce carries NO identity: webId stays on window.solid (null until auth).
+    expect((dom.window as unknown as { solid: { webId: unknown } }).solid.webId).toBeNull();
+  });
 });
 
 describe('inject — HIGH #1: the global-fetch patch marks routed requests autoDivert', () => {

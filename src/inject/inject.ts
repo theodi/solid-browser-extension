@@ -251,6 +251,28 @@ function installSolidInjection(): void {
 
   Object.defineProperty(window, 'solid', { value: Object.freeze(solid), configurable: false });
 
+  // --- Presence announce (apps de-dupe their own account chrome) --------------------------
+  //
+  // A page needs a RELIABLE, RACE-FREE way to know the Solid extension is installed so it can
+  // hide its OWN profile/logout controls (the extension already shows a pinned account menu —
+  // showing both is duplicate chrome). `'solid' in window` is the API, but a page script that
+  // runs BEFORE this MAIN-world inject (a race, since inject is document_start) would sniff a
+  // bare window and wrongly conclude "no extension". So we announce presence two ways, both
+  // credential-free (this only says "an extension is here", never who the user is):
+  //   1. a STICKY DOM marker on <html> — readable SYNCHRONOUSLY by app code whenever it runs,
+  //      even long after inject (it persists), so there is no ordering dependency; and
+  //   2. a one-shot CustomEvent for a listener that was already attached before inject ran.
+  // The webId still lives ONLY on `window.solid.webId` (null until auth) — the marker/event
+  // carry no identity. Wrapped defensively: an announce failure must never break `window.solid`.
+  try {
+    window.document.documentElement.setAttribute('data-solid-extension', '1');
+    // Use the page realm's own CustomEvent (window.CustomEvent === CustomEvent in a real page)
+    // so the event is same-realm with the window it is dispatched on.
+    window.dispatchEvent(new window.CustomEvent('solid-extension:ready'));
+  } catch {
+    // Non-fatal — the `window.solid` API above is the source of truth; the marker is a hint.
+  }
+
   // --- The MAIN-world global-`fetch` patch (design §5.1) ---------------------------------
   //
   // Generalises the `window.solid.fetch` proxy: transparently route a page's PLAIN

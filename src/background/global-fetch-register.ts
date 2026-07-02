@@ -2,16 +2,20 @@
 /**
  * Programmatic registration of the MAIN-world injection (design §5.1).
  *
- * This is the SINGLE injection path for `inject.js` into the MAIN world: it registers via
+ * A SECONDARY, runtime injection path for `inject.js` into the MAIN world via
  * `chrome.scripting.registerContentScripts({ world: 'MAIN', runAt: 'document_start',
- * persistAcrossSessions: true })` — the most reliable MAIN-world injection (the MetaMask
- * `window.ethereum` pattern). The manifest does NOT also declare `inject.js` as a MAIN-world
- * content script (Medium #2): declaring it BOTH ways let it run twice and the second run threw
- * on the `configurable:false` `Object.defineProperty(window,'solid',…)`. The dynamic
- * registration is idempotent (it removes a stale prior registration first), survives across
- * browser sessions (`persistAcrossSessions`), and gives a single code path to evolve the
- * injection without a manifest edit. (inject.ts ALSO carries a `window.__solidInjected` /
- * `'solid' in window` guard as defence-in-depth, so even an accidental double-run is inert.)
+ * persistAcrossSessions: true })` (the MetaMask `window.ethereum` pattern). The PRIMARY path
+ * is now the manifest-declared MAIN-world content script (see manifest.json) — that runs at
+ * document_start on EVERY navigation with NO dependency on the service worker being awake,
+ * whereas this dynamic registration only ever takes effect once the SW has run to register it
+ * (a dormant MV3 SW on a cold page load leaves `window.solid` undefined until something wakes
+ * it — the reason the manifest declaration is the reliable path). Both paths are kept: the
+ * manifest declaration for reliability, this one for runtime re-registration / evolution +
+ * `persistAcrossSessions`. Declaring it BOTH ways was ORIGINALLY the Medium #2 double-run throw
+ * on `Object.defineProperty(window,'solid',{configurable:false})`; that is now SAFE because
+ * inject.ts carries a `window.__solidInjected` / `'solid' in window` guard that makes the
+ * second run an inert no-op (covered by inject.test.ts). This function is idempotent (it removes
+ * a stale prior registration first) and survives across browser sessions.
  *
  * SECURITY NOTE: the injected script is BEST-EFFORT TRANSPARENCY with ZERO security weight
  * (design §5.1) — it is racy + bypassable, and the SW gate remains the sole boundary on every
